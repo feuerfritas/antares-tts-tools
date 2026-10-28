@@ -4009,7 +4009,11 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 roster's). `light` true: a fighter with a Melee or a Light
 --                 weapon has something to fight with; false: only a Melee
 --                 weapon counts (see the card's SKILL.hand).
+--   billboard     true: every seated player has a card copy of their own,
+--                 turned to face them; false: one copy shared by all (see
+--                 the card's CFG), lighter on a big table.
 RULES.cfg = {
+    billboard     = true,
     engageRange   = 1,
     nerveRanges   = { leader = 12, champion = 6 },
     nerveOutRange = 3,

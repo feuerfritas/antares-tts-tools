@@ -1288,7 +1288,11 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 roster's). `light` true: a fighter with a Melee or a Light
 --                 weapon has something to fight with; false: only a Melee
 --                 weapon counts (see the card's SKILL.hand).
+--   billboard     true: every seated player has a card copy of their own,
+--                 turned to face them; false: one copy shared by all (see
+--                 the card's CFG), lighter on a big table.
 RULES.cfg = {
+    billboard     = true,
     engageRange   = 1,
     nerveRanges   = { leader = 12, champion = 6 },
     nerveOutRange = 3,
@@ -1681,6 +1685,10 @@ local HOMEBREW = {
           offDesc = "Nothing shows who is in range before an action is taken: distances are judged by eye.",
           desc = "The cursor on Group Activation or Distribute Ammo highlights friendly fighters within range.",
           rules = { cfg = { preMeasure = true } } },
+        { id = "shared_card", off = "Card Per Player", name = "One Card For All", gameplay = true,
+          offDesc = "Every player sees the fighter card turned to face them, with their own hover and flyouts.",
+          desc = "One fighter card for everyone: it does not turn to face anyone, and hover, flyouts and compact view are shared. Lighter on big tables.",
+          rules = { cfg = { billboard = false } } },
         { id = "long_powers", off = "RAW Continuous Powers", name = "Long Continuous Powers",
           offDesc = "A Continuous Power lasts until the end of the Wyrd's activation (if not Maintain Control (S)).",
           desc = "A Continuous Power lasts until the end of the Wyrd's next activation.",
