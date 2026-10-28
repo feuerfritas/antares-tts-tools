@@ -22044,6 +22044,22 @@ end
 --      hooks where the rest of the game's rules can go.
 --============================================================================
 
+-- NQS fork (game-recorder !16): what the card last published for the two
+-- hooks below that report only the value after a change, onWoundsChanged
+-- and onActionsChanged -- so they emit `from` as well as `to`, and only on
+-- a real change. Kept on the card's bus table rather than in a local: this
+-- chunk is near Lua's 200-local ceiling. setFighter is wrapped, not edited,
+-- to (re)seed it from every fighter the card takes on (load, reset), so the
+-- first change after a load has a `from` and a whole new fighter is not
+-- reported as a change of the old one's wounds.
+__nqs_mundane_bus.card = { setFighter = setFighter }
+function setFighter(data)
+    local done = __nqs_mundane_bus.card.setFighter(data)
+    __nqs_mundane_bus.card.hp = fighter.wounds.current
+    __nqs_mundane_bus.card.actionsLeft = fighter.actionsLeft
+    return done
+end
+
 -- Fired after the status changes, whether picked on the card or by script.
 function onStatusChanged(key, label)
     -- STUB: apply what the status means, e.g. Engaged locking the fighter in
@@ -22061,6 +22077,19 @@ end
 -- or finished (0).
 function onActionsChanged(left)
     -- STUB: anything more an activation's actions do.
+    -- NQS fork: actionsLeft on the game-recorder bus (game-recorder !16).
+    -- `activation` rides along so a reader needs no second event; the
+    -- recorder diffs activation itself at keyframes.
+    local c, to = __nqs_mundane_bus.card, tonumber(left) or 0
+    if c.actionsLeft ~= nil and c.actionsLeft ~= to then
+        __nqs_mundane_bus.emit({
+            kind = "state_change", action = "actions_left",
+            fighter = fighter and fighter.name or nil,
+            field = "actions_left", from = c.actionsLeft, to = to,
+            activation = fighter and fighter.activation or nil,
+        })
+    end
+    c.actionsLeft = to
 end
 
 -- Fired when a condition's stacks change (C's panel, the bar under the
@@ -22075,6 +22104,16 @@ end
 function onWoundsChanged(current, max)
     -- STUB: anything more a change of wounds does. (Damage taken rolls its
     -- own Injury dice, see ACTIVATION.damage; wounds set by hand roll none.)
+    -- NQS fork: wounds on the game-recorder bus (game-recorder !16).
+    local c, to = __nqs_mundane_bus.card, tonumber(current) or 0
+    if c.hp ~= nil and c.hp ~= to then
+        __nqs_mundane_bus.emit({
+            kind = "state_change", action = "hp",
+            fighter = fighter and fighter.name or nil,
+            field = "hp", from = c.hp, to = to, max = tonumber(max),
+        })
+    end
+    c.hp = to
 end
 
 -- Fired by attackWith (a profile's attack button): attack = { weapon,
