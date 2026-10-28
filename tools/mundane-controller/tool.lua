@@ -3763,6 +3763,18 @@ function onAdvanceTurn(player, value, id)
     end
     printToAll(string.format("%sRound %d: %d fighter(s) readied%s.", CHAT_PREFIX, turn, n, updatedNote(up)),
         { 0.3, 1, 0.4 })
+    -- NQS fork: the round boundary on the game-recorder bus (agreed on
+    -- game-recorder !16, decision 3). The recorder takes `field ==
+    -- "ready_all"` as its primary round signal, so an N26 table marks its
+    -- rounds itself instead of falling back to Mark round. Forward only:
+    -- the right-click step back above returns before this, and is a
+    -- correction, not a round. Emitted after every card is readied, so the
+    -- cards' own actions_left events land first.
+    __nqs_mundane_bus.emit({
+        kind = "state_change", action = "ready_all", field = "ready_all",
+        round = turn, n = n,
+        player = player and player.color or nil,
+    })
 end
 
 -- A click on a setup row (setupBtn_<k>, see SETUP) -- Map Size: either
