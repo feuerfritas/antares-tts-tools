@@ -15945,6 +15945,28 @@ function rollInjuries(n, player)
             setOutOfAction{ value = true, why = "every Injury dice Out of Action" }
         end
         onInjuriesRolled(player, results, faces)
+        -- MI4b injury-roll publish, standalone variant (Special tab / obj.call
+        -- entry: there is no weapon context and no attack_id to tie it to).
+        -- The in-chain variant inside ACTIVATION.injure carries both; this one
+        -- carries the dice + outcome counts for the recorder's distribution
+        -- analysis. Standalone injury rolls are rare enough that an untied
+        -- event is honest -- there is no attack chain to group them with.
+        do
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = "injury roll",
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "INJURY"),
+                outcome = {
+                    out = count.out or 0,
+                    serious = count.serious or 0,
+                    injured = count.injured or 0,
+                    worst = worst,
+                    best = best,
+                    out_of_action = (count.out == #faces) and true or false,
+                },
+                player = tostring(color or player),
+            })
+        end
     end, "injury", title)
     return true
 end
@@ -18479,13 +18501,15 @@ function ACTIVATION.damage(t, failed, roll, player)
         if inj < 1 then return ACTIVATION.knockSelf(t, r) end
         ACTIVATION.later(r, function()
             ACTIVATION.injure(inj, from, player, { weapon = t.weapon, done = function(r2) ACTIVATION.knockSelf(t, r2) end,
-                                                   ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil })
+                                                   ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil,
+                                                   attack_id = t.attackSeq })
         end)
     end
     if pair then
         ACTIVATION.later(roll, function()
             ACTIVATION.injure(2, from, player, { weapon = t.weapon, best = boosted.name, done = rest,
-                                                 ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil })
+                                                 ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil,
+                                                 attack_id = t.attackSeq })
         end)
     else
         rest(roll)
@@ -18591,6 +18615,34 @@ function ACTIVATION.injure(n, from, player, o)
             setOutOfAction{ value = true, why = "Injury dice from " .. from }
         elseif worst == "serious" and fighter.status ~= "seriously_injured" then
             setStatus("seriously_injured")
+        end
+        -- MI4b injury-roll publish, in-chain variant (ACTIVATION.injure is
+        -- reached from ACTIVATION.damage after a wound goes through). Carries
+        -- the weapon that caused the damage (o.weapon) and -- when the caller
+        -- threaded it in `o.attack_id` -- the chain id that ties this
+        -- injury to the hit / wound / save already in the recorder's attack
+        -- group. The standalone rollInjuries site below publishes an
+        -- attack_id-less copy for Special-tab / obj.call entries. Shape
+        -- matches gang-roster's `action = "injury roll, <weapon>"` with
+        -- `dice.type = "INJURY"` (gang-roster SPEC's "Rolls" dice vocab).
+        do
+            __nqs_mundane_bus.emit({
+                kind = "roll",
+                action = o.weapon and ("injury roll, " .. tostring(o.weapon)) or "injury roll",
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "INJURY"),
+                weapon = o.weapon and tostring(o.weapon) or nil,
+                outcome = {
+                    out = count.out or 0,
+                    serious = count.serious or 0,
+                    injured = count.injured or 0,
+                    worst = worst,
+                    out_of_action = (worst == "out") and true or false,
+                },
+                attack_id = o.attack_id and tostring(o.attack_id) or nil,
+                attacker = from and tostring(from) or nil,
+                player = tostring(color or player),
+            })
         end
         if o.done and not fighter.outOfAction then o.done(shown) else ended() end
     end, "injury", title)
