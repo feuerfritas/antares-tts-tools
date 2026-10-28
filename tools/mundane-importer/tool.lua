@@ -87,9 +87,20 @@ if __nqs_mundane_bus == nil then
   -- Stamps `seq` and `t` on the event, JSON-encodes it, and hands the string
   -- to `publish`. The caller fills `kind`, `action`, `fighter`, `dice` and
   -- any per-kind extras; one call site = one `emit`.
+  --
+  -- `guid` is the fighter's identity on the bus, `fighter` only its display
+  -- name (game-recorder SPEC, "MI as a bus publisher", amended on
+  -- game-recorder !16, 2026-10-26). The stamp is the publishing object's own
+  -- GUID, so it is only right where the publisher IS the fighter: the card.
+  -- This body stays byte-identical in all three copies, and the copies
+  -- differ only in their setup line -- the card's sets `stamp_guid = true`,
+  -- this one and the Controller's do not, because their events (the Bottle
+  -- Check, gang-level) belong to no fighter. A caller that already set
+  -- `guid` keeps it.
   function __nqs_mundane_bus.emit(event)
     event.seq = __nqs_mundane_bus.nextSeq()
     event.t = Time.time
+    if __nqs_mundane_bus.stamp_guid and event.guid == nil then event.guid = self.getGUID() end
     __nqs_mundane_bus.publish(JSON.encode(event))
   end
 end
@@ -2347,7 +2358,10 @@ CARD_SCRIPT = [=[
 -- `require(...)` into MI's 1.1 MB object script, and `local Bus =
 -- require(...)` would push MI's main chunk past Lua's 200-local ceiling.
 -- The three copies' function bodies stay byte-identical by rule; see
--- CHANGELOG.md [Unreleased] "Added -- MI4a". The `if __nqs_mundane_bus
+-- CHANGELOG.md [Unreleased] "Added -- MI4a". Only the setup line differs:
+-- this copy sets `stamp_guid = true`, so `emit` stamps every event with
+-- `guid = self.getGUID()` -- the card IS the fighter (see the Importer's
+-- copy for why the other two do not). The `if __nqs_mundane_bus
 -- == nil then ...` guard keeps the block idempotent across cards that
 -- might share an env on reload.
 --
@@ -2356,7 +2370,7 @@ CARD_SCRIPT = [=[
 -- ACTIVATION call sites `JSON.encode` their event with Antares' own
 -- `JSON` global before calling `publish`.
 if __nqs_mundane_bus == nil then
-  __nqs_mundane_bus = { __seq = 0 }
+  __nqs_mundane_bus = { __seq = 0, stamp_guid = true }
 
   function __nqs_mundane_bus.publish(json_string)
     for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
@@ -2380,6 +2394,7 @@ if __nqs_mundane_bus == nil then
   function __nqs_mundane_bus.emit(event)
     event.seq = __nqs_mundane_bus.nextSeq()
     event.t = Time.time
+    if __nqs_mundane_bus.stamp_guid and event.guid == nil then event.guid = self.getGUID() end
     __nqs_mundane_bus.publish(JSON.encode(event))
   end
 end

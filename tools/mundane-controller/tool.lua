@@ -53,9 +53,12 @@ if __nqs_mundane_bus == nil then
     return out
   end
 
+  -- No `stamp_guid` here: a Controller event is gang-level, not a
+  -- fighter's. See the Mundane Importer's copy for the full header.
   function __nqs_mundane_bus.emit(event)
     event.seq = __nqs_mundane_bus.nextSeq()
     event.t = Time.time
+    if __nqs_mundane_bus.stamp_guid and event.guid == nil then event.guid = self.getGUID() end
     __nqs_mundane_bus.publish(JSON.encode(event))
   end
 end
