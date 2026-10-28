@@ -2597,6 +2597,11 @@ local CFG = {
     faceIdle   = 0.1,
     faceEvery  = 0.04,
     faceStep   = 1,
+    -- Players sitting, leaving or changing colour rebuild the card seatDelay
+    -- frames later, and up to seatSpread frames more, different for each
+    -- card, so that the cards on the table do not all rebuild at once.
+    seatDelay  = 30,
+    seatSpread = 30,
     yaw        = 0,
 
     -- How finely text is rasterised. TTS draws each glyph once at its
@@ -12037,17 +12042,47 @@ function ui.cancelHide(key)
     v.hoverToken = v.hoverToken + 1
 end
 
+-- Players sitting down, leaving or changing colour. Every card on the table
+-- hears the same event in the same frame, and a rebuild is a full setXml:
+-- so each waits CFG.seatDelay frames (the seat has settled by then, and a
+-- burst of events becomes one check) plus a few more, CFG.seatSpread at
+-- most, that differ from card to card by GUID -- as the updater spaces its
+-- requests -- so they do not all rebuild in the same frame. The card is
+-- rebuilt only if the players it shows to are not the ones it was built for.
+function ui.seatSoon()
+    ui.seatToken = (ui.seatToken or 0) + 1
+    local token = ui.seatToken
+    if not ui.seatLag then
+        local sum = 0
+        for c in tostring(self.getGUID()):gmatch(".") do sum = sum + c:byte() end
+        ui.seatLag = sum % (math.floor(tonumber(CFG.seatSpread) or 0) + 1)
+    end
+    local function check()
+        if token ~= ui.seatToken then return end        -- a later event takes over
+        if not ui.built or self.UI.loading then Wait.frames(check, 5) return end
+        if table.concat(ui.wantedViewers(), ",") ~= table.concat(ui.viewers, ",") then
+            refresh()
+        else
+            ui.facing = nil                             -- who each copy faces: looked up again
+        end
+    end
+    Wait.frames(check, (tonumber(CFG.seatDelay) or 0) + ui.seatLag)
+end
+function onPlayerChangeColor() ui.seatSoon() end
+function onPlayerConnect() ui.seatSoon() end
+function onPlayerDisconnect() ui.seatSoon() end
+
 -- Turning to face the players: every CFG.faceEvery seconds each copy
 -- eases toward its player and sends its rotation only once it is
 -- CFG.faceStep degrees off -- and once every copy faces its player (ui.still),
 -- only every CFG.faceIdle seconds, until a player's view turns again:
 -- every card on the table does this, so a still camera costs little.
--- Every 2 s the seated players are checked again, and the card rebuilt
--- when they changed; who each copy faces is looked up then too
--- (ui.facing). Every second the model's scale is looked at as well:
--- rescaled, every copy is moved and resized in place (see placement), so
--- the card keeps its size and stays over the head.
--- (ui.turnAt / ui.seatAt: when it last turned / checked the seats.)
+-- The seated players are not polled: TTS says when one sits, leaves or
+-- changes colour (ui.seatSoon), and the card is rebuilt then if they
+-- changed. Every second the model's scale is looked at: rescaled, every
+-- copy is moved and resized in place (see placement), so the card keeps
+-- its size and stays over the head.
+-- (ui.turnAt: when it last turned.)
 function update()
     -- Nothing to turn until the card exists -- and not while TTS is still
     -- building it from the XML: its elements aren't there to be set yet.
@@ -12066,14 +12101,6 @@ function update()
     local every = tonumber(CFG.faceEvery) or 0.02
     if dt < (ui.still and (tonumber(CFG.faceIdle) or every) or every) then return end
     ui.turnAt = now
-    if now - (ui.seatAt or 0) > 2 then
-        ui.seatAt = now
-        if table.concat(ui.wantedViewers(), ",") ~= table.concat(ui.viewers, ",") then
-            refresh()
-            return
-        end
-        ui.facing = nil
-    end
     if not ui.facing then
         ui.facing = {}
         for _, key in ipairs(ui.viewers) do ui.facing[key] = ui.facingPlayer(key) or false end
