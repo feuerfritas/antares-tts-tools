@@ -17,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 UPDATER = ROOT / "updater" / "updater.lua"
 TOOLS = ROOT / "tools"
 
+# Fork exception: a tool whose own code says this on a line of its own keeps
+# SELF_UPDATE=false. validate.py accepts it and --fix does not flip it back.
+PIN_MARKER = re.compile(r"^--\s*validate:\s*SELF_UPDATE=false is intentional\b", re.M)
+SELF_UPDATE_LINE = re.compile(r"^local\s+SELF_UPDATE\s*=.*$", re.M)
 CONFIG_KEYS = ("REPO_BASE", "TOOL_ID", "TOOL_VERSION", "TOOL_SIGNATURE")
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -159,6 +163,9 @@ def without_config(text):
     for key in CONFIG_KEYS:
         text = re.sub(r'^local\s+%s\s*=.*$' % key,
                       "local %s = <config>" % key, text, flags=re.M)
+    # SELF_UPDATE is compared by check_switch (true, or pinned by its marker),
+    # not here, so a pinned fork copy still matches the block otherwise.
+    text = SELF_UPDATE_LINE.sub("local SELF_UPDATE = <switch>", text)
     return text
 
 
@@ -190,6 +197,8 @@ def stamp(text, tool_id, version, xml=None):
     block = set_config(block, "TOOL_ID", tool_id)
     block = set_config(block, "TOOL_VERSION", version)
     block = set_config(block, "TOOL_SIGNATURE", signature)
+    if PIN_MARKER.search(head):
+        block = SELF_UPDATE_LINE.sub("local SELF_UPDATE    = false", block)
     return head + ui + DIVIDER + block
 
 

@@ -4348,6 +4348,12 @@ function onLoad(saved)
     if next(RULES.active) then Wait.frames(RULES.push, 2) end
 end
 
+-- Fork pin: the SELF_UPDATE line below is false on purpose. It stays false until
+-- releases of this fork come from the composer pipeline; until then `!update`
+-- would replace the recorder-bus version with whatever REPO_BASE serves,
+-- unreviewed. scripts/validate.py accepts false only with this marker line:
+-- validate: SELF_UPDATE=false is intentional (fork pin)
+
 -- ===========================================================================
 -- Everything below this line is updater/updater.lua, pasted unchanged.
 -- ===========================================================================
@@ -4372,7 +4378,7 @@ end
 -- Stop Updates permanently: set SELF_UPDATE to false and nothing below ever runs.
 -- Adopting the block: set the three TOOL_ values.
 -- Forking the repo: change REPO_BASE, the only string here that names a host.
-local SELF_UPDATE    = true                    -- false pins this copy for good
+local SELF_UPDATE    = false
 local REPO_BASE      = "https://raw.githubusercontent.com/feuerfritas/antares-tts-tools/main"
 local TOOL_ID        = "mundane-controller"
 local TOOL_VERSION   = "3.0.0"                 -- bumped with manifest.json

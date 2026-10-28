@@ -109,6 +109,8 @@ def check_switch(where, text):
     A published file with it set to false would install a dead updater on
     everyone who takes the update, and nothing in game would say why.
     """
+    if re.search(r"^--\s*validate:\s*SELF_UPDATE=false is intentional\b", text, re.M):
+        return   # fork exception: the file says so itself, in a reviewable line
     if not re.search(r"^local\s+SELF_UPDATE\s*=\s*true\b", text, re.M):
         fail(where, "SELF_UPDATE is not `true`, so every copy of this file "
                     "would stop updating for good",
