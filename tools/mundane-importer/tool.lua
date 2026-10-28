@@ -15584,6 +15584,14 @@ function throwDice(n, color, done, kind, label)
             rotation = { math.random(0, 359), math.random(0, 359), math.random(0, 359) },
             callback_function = function(o)
                 if color and stringColorToRGB then o.setColorTint(stringColorToRGB(color)) end
+                -- NQS fork: dedup tag for the game-recorder's Type 2 observer,
+                -- which sees die spawns via onObjectSpawn and skips any carrying
+                -- this tag -- the bus-publish event already carries the roll
+                -- with its full game context (fighter, weapon, action, faces),
+                -- so the physical die is redundant. Shared tag name with gang-
+                -- roster's spawns on purpose: the observer only needs to know
+                -- WHETHER a sibling claimed the roll, not WHO. See MR !27.
+                o.addTag("gang-roster-roll")
                 d.kick = ACTIVATION.tumble(o, CFG.diceSpin, CFG.dicePush)
             end,
         })

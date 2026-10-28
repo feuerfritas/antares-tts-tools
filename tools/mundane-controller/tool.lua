@@ -3227,6 +3227,15 @@ function DICE.spawn(req, kind)
             pcall(function()
                 obj.setName(DICE.NAMES[kind] or "D6")
                 obj.addTag(DICE.TAG)
+                -- NQS fork: dedup tag for the game-recorder's Type 2 observer,
+                -- which sees die spawns via onObjectSpawn and skips any
+                -- carrying this tag -- the bus-publish event already carries
+                -- the roll with its full game context (fighter, weapon,
+                -- action, faces), so the physical die is redundant. Shared
+                -- tag name with gang-roster's spawns on purpose: the observer
+                -- only needs to know WHETHER a sibling claimed the roll, not
+                -- WHO. See MR !27.
+                obj.addTag("gang-roster-roll")
                 if url == "" and req.color and stringColorToRGB then
                     local c = stringColorToRGB(req.color)
                     obj.setColorTint({ 0.45 + 0.55 * c.r, 0.45 + 0.55 * c.g, 0.45 + 0.55 * c.b })
