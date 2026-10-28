@@ -3667,6 +3667,27 @@ function onBottleRoll(player, value, id)
         DICE.announce(string.format("[%s] Bottle Check (2D6): %d + %d = %d, %s%s", gang, faces[1], faces[2], total,
             verdict, digital and " (rolled digitally)" or ""),
             (target and total <= target) and { 0.3, 1, 0.4 } or { 1, 0.35, 0.3 })
+        -- MI4b-8 bottle-check bus publish. Gang-level 2D6 lte against the
+        -- gang's Ld (set by hand on BOTTLE.hand[n] or derived from the
+        -- highest-Ld fighter still on the table via BOTTLE.target). Published
+        -- from the Controller because the Bottle Check is a gang-level event,
+        -- not a per-fighter one -- the Controller holds the gang's Ld state
+        -- and names both sides. Natural 12 is the Necromunda "worst-case"
+        -- edge: two models leave rather than one.
+        __nqs_mundane_bus.emit({
+            kind = "roll", action = "bottle check",
+            gang = gang,
+            dice = __nqs_mundane_bus.diceArray({ faces[1], faces[2] }, "D6"),
+            direction = target and "lte" or nil,
+            target = target,
+            outcome = {
+                passed = target and (total <= target) or nil,
+                total = total,
+                natural_12 = (total == 12) and true or nil,
+                models_leaving = (target and total > target) and (total == 12 and 2 or 1) or nil,
+            },
+            player = color,
+        })
     end)
 end
 

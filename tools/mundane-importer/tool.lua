@@ -15973,6 +15973,18 @@ function rollDice(n, player)
         for _, f in ipairs(faces) do total = total + f end
         ACTIVATION.say(string.format("Roll %dD6", n), faces, total, { color = color, digital = digital })
         ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, sum = "∑" .. total }
+        -- MI4b-6 standalone D6 roll publish (Special tab's "Roll Dice" button
+        -- or external obj.call). No semantic context -- just dice and their
+        -- sum. The recorder treats this as a non-chain roll with
+        -- `action = "d6 roll"`, which the webplayer can still render as "the
+        -- fighter picked up N dice and the player read them".
+        __nqs_mundane_bus.emit({
+            kind = "roll", action = "d6 roll",
+            fighter = fighter and fighter.name or nil,
+            dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+            outcome = { total = total },
+            player = tostring(color or player),
+        })
     end, "d6", title)
     return true
 end
@@ -16003,6 +16015,19 @@ function rollFirepower(n, player)
         ACTIVATION.showDice{ title = title, kind = "firepower", faces = faces, sumInk = hits > 0 and COL.valueUp or COL.valueMod,
                              sum = "∑" .. hits, ammoState = ACTIVATION.ammoState(checks) }
         onFirepowerRolled(player, { face = faces[1], faces = faces, hits = hits, ammo = ammo })
+        -- MI4b-6 standalone firepower-roll publish (Special tab's "Roll
+        -- Firepower" button). In-attack firepower dice are already folded
+        -- into MI4a's hit-roll `dice` array (the FIREPOWER kinds in the
+        -- middle of `faces`), so this is for the loose roll with no attack
+        -- context. `action = "firepower"` + FIREPOWER-typed dice; outcome
+        -- carries hits and the ammo-check flag.
+        __nqs_mundane_bus.emit({
+            kind = "roll", action = "firepower",
+            fighter = fighter and fighter.name or nil,
+            dice = __nqs_mundane_bus.diceArray(faces, "FIREPOWER"),
+            outcome = { hits = hits, ammo_checks = checks, ammo_fired = ammo and true or false },
+            player = tostring(color or player),
+        })
     end, "firepower", title)
     return true
 end
@@ -18873,6 +18898,22 @@ function ACTIVATION.reloadNow(list, player, o)
             setProfileState({ weapon = e.i, profile = e.pi, ammo = R.ammoNext(e.w, e.p, false) })
             if not seen[e.w] then seen[e.w], names[#names + 1] = true, { name = TRAIT_RULES.name(e.w) } end
             onReloadRolled(player, { weapon = e.i, profile = e.pi, reloaded = true })
+            -- MI4b-4 reload bus publish, no-Scarce branch (free reload). Matches
+            -- gang-roster's `kind=event, event="reloaded"` shape (SPEC's "Rolls"
+            -- section groups `out_of_ammo` and `reloaded` under event-kind rather
+            -- than state_change-kind because they are weapon-state transitions
+            -- with no numeric from/to -- just "the weapon is reloaded now").
+            do
+                local __wname = TRAIT_RULES.name(e.w)
+                __nqs_mundane_bus.emit({
+                    kind = "event", event = "reloaded",
+                    fighter = fighter and fighter.name or nil,
+                    weapon = __wname and tostring(__wname) or nil,
+                    profile = e.pi,
+                    scarce = false,
+                    player = tostring(colorOf and colorOf(player) or player),
+                })
+            end
         end
     end
     if #names > 0 and o.say then o.say(names) end
@@ -18895,6 +18936,30 @@ function ACTIVATION.reloadNow(list, player, o)
                     end
                     onReloadRolled(player, { weapon = e.i, profile = e.pi, face = f, need = s.need, reloaded = ok,
                                              digital = digital })
+                    -- MI4b-4 Scarce ammo-test publish: a reload with Scarce (N+)
+                    -- is a dice roll, N+ to reload, less-than-N stays OUT. Shape
+                    -- matches gang-roster's `action = "ammo test, <weapon>"`
+                    -- with `direction="gte"`, `target=N`. Unlike the no-Scarce
+                    -- branch (an event-kind "reloaded"), this one is `kind=roll`
+                    -- because dice land and the recorder's distribution
+                    -- analysis cares. On success it is followed by nothing on
+                    -- the bus (the state change is implicit in outcome.passed);
+                    -- on failure, the weapon stays OUT and nothing follows.
+                    do
+                        local __wname = TRAIT_RULES.name(e.w)
+                        __nqs_mundane_bus.emit({
+                            kind = "roll",
+                            action = __wname and ("ammo test, " .. tostring(__wname)) or "ammo test",
+                            fighter = fighter and fighter.name or nil,
+                            dice = __nqs_mundane_bus.diceArray({ f }, "D6"),
+                            direction = "gte",
+                            weapon = __wname and tostring(__wname) or nil,
+                            profile = e.pi,
+                            target = s.need,
+                            outcome = { passed = ok and true or false, reason = "scarce" },
+                            player = tostring(colorOf and colorOf(player) or player),
+                        })
+                    end
                 end
             end
             ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hls = hls, ammoDie = #scarce == 1 and 1 or nil,
@@ -19452,6 +19517,28 @@ function rollNerve(player)
             chat(string.format("%s keeps their nerve -- not Suppressed", fighter.name), rgbOf(COL.valueUp))
         end
         onNerveRolled(player, test)
+        -- MI4b-5 Nerve Check bus publish. `rollNerve` implements its own 2D6
+        -- lte Cl flow directly rather than routing through `rollTest`, so
+        -- MI4b-3's rollTest publish does NOT catch Nerve Checks on its own.
+        -- Shape mirrors a Cool-check `rollTest` publish for consistency, with
+        -- extra fields: `from` (whose Cl the check used -- "Boss's Cl" when
+        -- borrowed), `steel` (Nerves Of Steel's check against being
+        -- Suppressed), and `auto` (the Outcast Leader's auto-pass).
+        __nqs_mundane_bus.emit({
+            kind = "roll",
+            action = "Cool check",
+            fighter = fighter and fighter.name or nil,
+            dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+            direction = "lte",
+            stat = "Cl",
+            target = n.value,
+            outcome = { passed = test.passed and true or false, total = total,
+                        auto = test.auto, nerve = true,
+                        steel = n.steel and true or nil },
+            from = n.from,
+            why = n.title and tostring(n.title) ~= "Nerve Check" and tostring(n.title) or "Nerve Check",
+            player = tostring(color or player),
+        })
     end, "d6", title)
     return test
 end
@@ -19510,6 +19597,32 @@ function ACTIVATION.rollGroup(n, player)
         test.activated = {}
         for i, o in ipairs(taken) do test.activated[i] = o.name end
         onGroupRolled(player, test)
+        -- MI4b-5 Group Activation bus publish. Like `rollNerve`, this is a
+        -- 2D6 lte check that implements its own flow rather than routing
+        -- through `rollTest`, so MI4b-3's rollTest publish does NOT catch it.
+        -- `test.activated` carries the names of friends who were group-
+        -- activated by this check; `test.rerolled` carries the first-roll
+        -- total when a Cult Icon's `groupReroll` re-threw the check (then
+        -- `faces`/`total` are the second roll's). On failure, no friends
+        -- activate; on pass, every friend within range flips to Group
+        -- Activated.
+        __nqs_mundane_bus.emit({
+            kind = "roll",
+            action = "Leadership check",
+            fighter = fighter and fighter.name or nil,
+            dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+            direction = "lte",
+            stat = "Ld",
+            target = n.value,
+            outcome = { passed = test.passed and true or false, total = test.total,
+                        group_activation = true,
+                        rerolled = test.rerolled,
+                        activated = test.activated,
+                        activated_count = #test.activated,
+                        far_count = #far },
+            why = "Group Activation",
+            player = tostring(color or player),
+        })
     end
     ACTIVATION.rolling(title)
     throwDice(2, color, function(faces, digital)
@@ -21592,6 +21705,27 @@ function ACTIVATION.moveBy(a, player, rgb, head)
         end
         ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, lead = lead, sum = result, inline = true }
         chat(string.format('%s - %g"%s', head, sum, digital and " (rolled digitally)" or ""), rgb)
+        -- MI4b-5 move-distance publish: a Charge, Engage or any action whose
+        -- distance has a D6 in `a.distance` goes here, and the dice land in
+        -- `faces`. gang-roster's shape is `action="charge"` with `target="M+D6"`
+        -- for a 1-die move, `action="engage"` for 0-stat 1D6 moves, etc. --
+        -- MI's `a.key` already carries the matching action key. Only emits when
+        -- the roll actually involved dice (`#faces > 0`); a plain Move with
+        -- no dice has nothing to say to the recorder. `outcome.inches` is the
+        -- total distance (base + dice), which the recorder's post-game stats
+        -- can slice by charge length.
+        if #faces > 0 then
+            __nqs_mundane_bus.emit({
+                kind = "roll",
+                action = tostring(a.key or "move"),
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+                direction = nil,
+                outcome = { inches = sum, base = total, dice_sum = sum - total },
+                label = a.label and tostring(a.label) or nil,
+                player = tostring(colorOf and colorOf(player) or player),
+            })
+        end
         return sum
     end
     if dice == 0 then return show({}) end
