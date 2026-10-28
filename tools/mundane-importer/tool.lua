@@ -2334,6 +2334,56 @@ CARD_SCRIPT = [=[
      actions do) has its clearly marked stubs in the STUBS section.
 ========================================================================== ]]
 
+--@@PART 00a_nqs_bus.lua
+-- NQS fork, see TTSModfile.yaml `forked: true`. The fighter card runs its
+-- OWN copy of `__nqs_mundane_bus.publish/nextSeq/diceArray/emit`: this
+-- script is injected onto every fighter model at import time, and when
+-- its `ACTIVATION.attackDice.landed` / `ACTIVATION.woundRoll.landed` /
+-- `ACTIVATION.rollSaves` fire the three MI4a publish sites below, the
+-- card is in its own object script's environment with no reach to the
+-- Importer's top-level globals. The publisher is inlined (not required
+-- via a Workshop dep) for the same two reasons as the Importer's and
+-- Controller's copies: ttsmm's luabundle integration hangs on a
+-- `require(...)` into MI's 1.1 MB object script, and `local Bus =
+-- require(...)` would push MI's main chunk past Lua's 200-local ceiling.
+-- The three copies' function bodies stay byte-identical by rule; see
+-- CHANGELOG.md [Unreleased] "Added -- MI4a". The `if __nqs_mundane_bus
+-- == nil then ...` guard keeps the block idempotent across cards that
+-- might share an env on reload.
+--
+-- JSON STRING ACROSS THE BOUNDARY, NEVER A TABLE: TTS marshalling of a
+-- nested table silently drops it (homelab CLAUDE.md, cross-cuts). The
+-- ACTIVATION call sites `JSON.encode` their event with Antares' own
+-- `JSON` global before calling `publish`.
+if __nqs_mundane_bus == nil then
+  __nqs_mundane_bus = { __seq = 0 }
+
+  function __nqs_mundane_bus.publish(json_string)
+    for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
+      pcall(obj.call, "bus_publish", json_string)
+    end
+  end
+
+  function __nqs_mundane_bus.nextSeq()
+    __nqs_mundane_bus.__seq = __nqs_mundane_bus.__seq + 1
+    return __nqs_mundane_bus.__seq
+  end
+
+  function __nqs_mundane_bus.diceArray(faces, kind)
+    local out = {}
+    for i, f in ipairs(faces) do
+      out[i] = { type = kind or "D6", value = f, face = tostring(f) }
+    end
+    return out
+  end
+
+  function __nqs_mundane_bus.emit(event)
+    event.seq = __nqs_mundane_bus.nextSeq()
+    event.t = Time.time
+    __nqs_mundane_bus.publish(JSON.encode(event))
+  end
+end
+
 --@@PART 00b_model.lua
 --============================================================================
 -- 0b. MODEL -- a fighter model's base, height and looks (MODEL): kept the
