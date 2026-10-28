@@ -14327,6 +14327,24 @@ function setStatus(key)
     -- no other goes back to Active
     if def.key == "seriously_injured" and before ~= def.key then checkEngagement() end
     onStatusChanged(def.key, def.label)
+    -- MI4b-2 state_change publish on status transition. The three
+    -- gang-roster-canonical statuses it reaches are `active`, `pinned`,
+    -- `prone`, `engaged`, `seriously_injured` -- plus Antares' own
+    -- additions (`suppressed`, `webbed`, ...). The recorder reads this
+    -- shape as "fighter's `status` field changed from <before> to <to>",
+    -- same as gang-roster's own `State.statusLine` publish. Only emits
+    -- when the status actually changes; a no-op setStatus (same key)
+    -- publishes nothing, keeping the bus quiet during UI re-renders.
+    if def.key ~= before then
+        __nqs_mundane_bus.emit({
+            kind = "state_change", action = "status",
+            fighter = fighter and fighter.name or nil,
+            field = "status",
+            from = before,
+            to = def.key,
+            label = def.label,
+        })
+    end
     return def.key
 end
 
@@ -14642,6 +14660,24 @@ function setOutOfAction(on)
     end
     ACTIVATION.gangMoved()
     ACTIVATION.tellController(not on)
+    -- MI4b-2 state_change publish on Out-of-Action transition. One of the
+    -- two round-ending fates for a fighter (the other is a passed Recovery
+    -- test, handled in setStatus's own publish above). `why` carries the
+    -- reason text ("every Injury dice Out of Action", "Injury dice from Kal's
+    -- Autogun", ...) so the recorder can tie an OOA back to the attack chain
+    -- that caused it without needing the attacker's card to publish a
+    -- separate "took OOA" event. `out_cold` is set when it is a non-lethal
+    -- knockout (gang-roster has no corresponding field; the recorder
+    -- consumes it as an optional enrichment).
+    __nqs_mundane_bus.emit({
+        kind = "state_change", action = "out_of_action",
+        fighter = fighter and fighter.name or nil,
+        field = "out_of_action",
+        from = not on,
+        to = on,
+        out_cold = fighter and fighter.outCold or nil,
+        why = why,
+    })
     return on
 end
 
@@ -15106,6 +15142,25 @@ function setCondition(key, n)
         ACTIVATION.wyrdDraw()
     end
     if n ~= before then onConditionChanged(key, n, before) end
+    -- MI4b-2 state_change publish on condition transition. gang-roster
+    -- publishes one `kind=state_change, action="condition"` per flip
+    -- (Blind on/off, Suppressed stacks changing, Feared on/off, etc).
+    -- `stacks` carries the count for conditions that stack (Concussive's
+    -- Concussion up to N); unstacking conditions use 0 or 1. Only emits
+    -- on actual change; a no-op setCondition (n == before) publishes
+    -- nothing.
+    if n ~= before then
+        __nqs_mundane_bus.emit({
+            kind = "state_change", action = "condition",
+            fighter = fighter and fighter.name or nil,
+            field = "condition",
+            key = tostring(key),
+            label = CONDITIONS[i] and CONDITIONS[i].label or nil,
+            from = before,
+            to = n,
+            stacks = (CONDITIONS[i] and CONDITIONS[i].stacks) and true or false,
+        })
+    end
     return n
 end
 
