@@ -1,0 +1,30 @@
+{
+  "looks": {
+    "accent": "#E8C97A",
+    "background": "#1D2027",
+    "edges": "#6B5B33",
+    "frame": "",
+    "headers": "#9AA3AE",
+    "text": "#F2F2F2",
+    "tint": "yes",
+    "trim": ""
+  },
+  "spots": [
+    [
+      2.25,
+      0.25,
+      0
+    ],
+    [
+      0,
+      0.25,
+      0
+    ],
+    [
+      -2.25,
+      0.25,
+      0
+    ]
+  ],
+  "version": "3.0.0"
+}
