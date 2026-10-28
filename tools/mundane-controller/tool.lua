@@ -21,6 +21,24 @@
 --  the table, before this calls on every fighter.
 -- ==============================================================
 
+-- NQS fork, see TTSModfile.yaml `forked: true`:
+-- `__nqs_mundane_bus.publish(json)` is the publish-to-game-recorder helper
+-- the MR !27 ACTIVATION patches call from the gang-level event sites
+-- (bottle check, group activation open). The code is inlined here as the
+-- Mundane Importer (e4e1fb) carries an identical copy; see that file for
+-- the reasons we did not reach for `require(...)` -- any edit to the body
+-- must land in both copies in the same commit. See CHANGELOG.md
+-- [Unreleased] "Changed -- MI3".
+if __nqs_mundane_bus == nil then
+  __nqs_mundane_bus = {}
+
+  function __nqs_mundane_bus.publish(json_string)
+    for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
+      pcall(obj.call, "bus_publish", json_string)
+    end
+  end
+end
+
 local CONTROLLER_NAME = "Mundane Controller"
 local VERSION         = "?"   -- the running version, handed over by the updater block
 

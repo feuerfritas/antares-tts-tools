@@ -28,6 +28,42 @@
 --  (CARD_SCRIPT).
 -- ==============================================================
 
+-- NQS fork, see TTSModfile.yaml `forked: true`:
+-- `__nqs_mundane_bus.publish(json)` is the publish-to-game-recorder helper
+-- the MR !27 ACTIVATION patches call from each resolve callback. The code
+-- is inlined here (not `require`d from `src/mundane_bus.ttslua`) because
+-- (1) ttsmm's luabundle integration hangs for 10+ minutes trying to bundle
+-- a `require(...)` into a 1.1 MB object script -- verified 2026-10-19 on
+-- commits for MI3 -- and (2) a local `Bus = require(...)` would add a
+-- local to this file's main chunk, which is close enough to Lua's 200-
+-- local ceiling that gang-roster hit it on the same move (see gang-roster
+-- commit e6e4d5b, `src/roster_bus.ttslua`'s header). Inlining the two
+-- functions on a global namespace sidesteps both. The Mundane Controller
+-- (e27378) carries an identical copy for the gang-level events (bottle
+-- check, group activation open) -- any edit here must land in that copy
+-- in the same commit. See CHANGELOG.md [Unreleased] "Changed -- MI3".
+--
+-- JSON STRING ACROSS THE BOUNDARY, NEVER A TABLE: TTS marshalling of a
+-- nested table silently drops it (homelab CLAUDE.md, cross-cuts). The
+-- ACTIVATION call sites `JSON.encode` their event with Antares' own `JSON`
+-- global before calling `publish`.
+if __nqs_mundane_bus == nil then
+  __nqs_mundane_bus = {}
+
+  -- Finds every object tagged `gamerecorder` and hands it the event. No
+  -- recorder on the table is a no-op, not an error: MI's card UI works
+  -- identically without one. `pcall` degrades gracefully when the recorder
+  -- is present but something inside its `bus_publish` crashes -- a bus
+  -- event the recorder could not take in is still not a reason to break
+  -- MI's play, and MI's ACTIVATION callbacks run inside TTS's event loop
+  -- where an uncaught error would crash the handler.
+  function __nqs_mundane_bus.publish(json_string)
+    for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
+      pcall(obj.call, "bus_publish", json_string)
+    end
+  end
+end
+
 local IMPORTER_NAME = "Mundane Importer"
 local VERSION       = "?"   -- the running version, handed over by the updater block
 
