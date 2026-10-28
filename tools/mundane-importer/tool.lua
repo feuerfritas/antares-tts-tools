@@ -14609,6 +14609,26 @@ function getActivation()
              readyMarks = fighter.readyMarks }
 end
 
+-- NQS fork (game-recorder !16): the stat block as the card shows it, as a
+-- JSON string -- { M = '5"', WS = "6+", I = "2", ... } -- for the recorder,
+-- which neither can nor should recompute what statMod sums. Every value is
+-- the card's own statText, with the context of the shared copy, "all" (see
+-- weaponContext): a Shield / Parry's save always, a weapon popup's only while
+-- one is open on that copy -- under billboard there is no shared copy, and it
+-- is what a player with nothing open sees. A number clicked but not kept yet
+-- (pendingStats) shows, as it does on the card. "-" for a stat with none. A string, not a table: a
+-- nested table does not cross a script boundary. GR_SHOWN_STATS lets a
+-- reader test for this accessor with getVar before calling it -- an
+-- obj.call to a function an older card lacks logs an error nothing catches.
+GR_SHOWN_STATS = true
+function getShownStats()
+    local out = {}
+    for _, key in ipairs({ "M", "WS", "BS", "S", "T", "W", "I", "A", "Ld", "Cl", "Wil", "Int", "Sv" }) do
+        out[key] = statText(key, weaponContext("all"))
+    end
+    return JSON.encode(out)
+end
+
 -- Group activated (true): a friend's passed Group Activation takes this
 -- fighter along -- it may activate once that friend has finished -- shown
 -- by CFG.groupMark after its name until it activates (or the round ends,
