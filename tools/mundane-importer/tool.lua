@@ -15482,10 +15482,12 @@ end
 -- It also drops any hand-set number for the stat.
 function setStat(key, value)
     key, value = keyValue(key, value)
+    local was = fighter.stats[key]                -- NQS fork: for the bus, below
     fighter.stats[key] = value
     fighter.statEdits[key] = nil
     pendingStats[key] = nil
     refresh()
+    __nqs_mundane_bus.statChanged("statline", key, was, value)
     return true
 end
 
@@ -15516,6 +15518,7 @@ end
 -- (light blue), or plain again when it is the statline's own. Returns the
 -- number.
 function keepStat(key)
+    local was = statKept(key)                     -- NQS fork: for the bus, below
     local n = statBase(key)
     pendingStats[key] = nil
     if n then
@@ -15523,6 +15526,7 @@ function keepStat(key)
         fighter.statEdits[key] = n ~= statOriginal(key) and n or nil
     end
     ui.drawStats()
+    __nqs_mundane_bus.statChanged("stat", key, was, statKept(key))
     return n
 end
 
@@ -15532,9 +15536,11 @@ end
 function stepStat(key)
     local n = steppedStat(key, 1)
     if not n then return nil end
+    local was = statKept(key)                     -- NQS fork: for the bus, below
     pendingStats[key] = nil
     fighter.statEdits[key] = n ~= statOriginal(key) and n or nil
     ui.drawStats()
+    __nqs_mundane_bus.statChanged("stat", key, was, statKept(key))
     return n
 end
 end
@@ -22073,6 +22079,23 @@ end
 -- first change after a load has a `from` and a whole new fighter is not
 -- reported as a change of the old one's wounds.
 __nqs_mundane_bus.card = { setFighter = setFighter }
+
+-- NQS fork (game-recorder !16): a permanent stat change on the bus, from the
+-- three setters that make one (keepStat, stepStat: field "stat", the kept
+-- numbers; setStat: field "statline", the statline's own strings). Only on a
+-- real change. A function on the bus table, so the setters each gain two
+-- lines and the chunk gains no local.
+function __nqs_mundane_bus.statChanged(field, key, from, to)
+    if field == "statline" then
+        from, to = from ~= nil and tostring(from) or nil, to ~= nil and tostring(to) or nil
+    end
+    if from == to then return end
+    __nqs_mundane_bus.emit({
+        kind = "state_change", action = field,
+        fighter = fighter and fighter.name or nil,
+        field = field, key = tostring(key), from = from, to = to,
+    })
+end
 function setFighter(data)
     local done = __nqs_mundane_bus.card.setFighter(data)
     __nqs_mundane_bus.card.hp = fighter.wounds.current
