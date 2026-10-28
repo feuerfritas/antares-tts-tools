@@ -15859,6 +15859,44 @@ function ACTIVATION.rollTest(key, player, o)
         ACTIVATION.showDice{ title = test.natural and "Perils of the Warp!" or title, kind = "d6", faces = faces,
                              hl = ACTIVATION.checkInk(test), sum = not test.target and ("∑" .. total) or nil }
         onStatRoll(player, test)
+        -- MI4b-3 stat-test / stat-roll bus publish. Reached for every
+        -- `<Stat> Check` (2D6 lte for Ld/Cl/Wil/Int, 1D6 lte for S/T/I)
+        -- and every stat-only roll (M, A -- no target, no pass/fail).
+        -- Shape maps to gang-roster's `action = "<Stat> check"` for the
+        -- `test.under == true` branch (lte checks) and `"<Stat> roll"`
+        -- for the stat-only branch. `natural` captures the 2 / 12 edge
+        -- cases for the Perils of the Warp casting rules. `why` passes
+        -- `o.why` through so the recorder sees "Fearsome", "Nerve",
+        -- "Spring Up" etc as the reason this check was made.
+        do
+            local __stat_names = { Cl = "Cool", Ld = "Leadership", Wil = "Willpower",
+                                   Int = "Intelligence", S = "Strength", T = "Toughness",
+                                   I = "Initiative", Sv = "Save", Inv = "Invulnerable save" }
+            local __action
+            if test.target == nil then
+                __action = (__stat_names[key] or key) .. " roll"
+            else
+                __action = (__stat_names[key] or key) .. " check"
+            end
+            local __outcome
+            if test.target ~= nil then
+                __outcome = { passed = test.passed and true or false, total = test.total }
+                if test.natural then __outcome.natural = test.natural end
+            else
+                __outcome = { total = test.total }
+            end
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = __action,
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+                direction = test.target and (test.under and "lte" or "gte") or nil,
+                stat = key,
+                target = test.target,
+                outcome = __outcome,
+                why = o.why or nil,
+                player = tostring(color or player),
+            })
+        end
         if o.done then o.done(test, ACTIVATION.roll) end
     end, "d6", title)
     return test
