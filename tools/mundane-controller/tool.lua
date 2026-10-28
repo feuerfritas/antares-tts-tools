@@ -30,12 +30,33 @@
 -- must land in both copies in the same commit. See CHANGELOG.md
 -- [Unreleased] "Changed -- MI3".
 if __nqs_mundane_bus == nil then
-  __nqs_mundane_bus = {}
+  __nqs_mundane_bus = { __seq = 0 }
 
   function __nqs_mundane_bus.publish(json_string)
     for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
       pcall(obj.call, "bus_publish", json_string)
     end
+  end
+
+  -- A monotonic per-publisher sequence number. See the Mundane Importer's
+  -- copy of this block for the full header.
+  function __nqs_mundane_bus.nextSeq()
+    __nqs_mundane_bus.__seq = __nqs_mundane_bus.__seq + 1
+    return __nqs_mundane_bus.__seq
+  end
+
+  function __nqs_mundane_bus.diceArray(faces, kind)
+    local out = {}
+    for i, f in ipairs(faces) do
+      out[i] = { type = kind or "D6", value = f, face = tostring(f) }
+    end
+    return out
+  end
+
+  function __nqs_mundane_bus.emit(event)
+    event.seq = __nqs_mundane_bus.nextSeq()
+    event.t = Time.time
+    __nqs_mundane_bus.publish(JSON.encode(event))
   end
 end
 

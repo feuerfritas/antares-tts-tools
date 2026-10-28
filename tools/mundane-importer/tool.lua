@@ -48,7 +48,7 @@
 -- ACTIVATION call sites `JSON.encode` their event with Antares' own `JSON`
 -- global before calling `publish`.
 if __nqs_mundane_bus == nil then
-  __nqs_mundane_bus = {}
+  __nqs_mundane_bus = { __seq = 0 }
 
   -- Finds every object tagged `gamerecorder` and hands it the event. No
   -- recorder on the table is a no-op, not an error: MI's card UI works
@@ -61,6 +61,36 @@ if __nqs_mundane_bus == nil then
     for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
       pcall(obj.call, "bus_publish", json_string)
     end
+  end
+
+  -- A monotonic per-publisher sequence number. The recorder orders events
+  -- deterministically whether or not `Time.time` resolution ties. Each forked
+  -- object counts its own sequence; the recorder also stamps a receive-order
+  -- seq of its own (see game-recorder SPEC Channel 2 for the ordering rules).
+  function __nqs_mundane_bus.nextSeq()
+    __nqs_mundane_bus.__seq = __nqs_mundane_bus.__seq + 1
+    return __nqs_mundane_bus.__seq
+  end
+
+  -- `faces` (plain list of face values) -> gang-roster's dice-array shape,
+  -- SPEC's "Rolls" section: one entry per die, `{type, value, face}` in roll
+  -- order. `kind` overrides the default "D6"; a non-D6 roll (FIREPOWER die,
+  -- Injury dice) names its own kind, matching gang-roster's `Rolls.DICE` keys.
+  function __nqs_mundane_bus.diceArray(faces, kind)
+    local out = {}
+    for i, f in ipairs(faces) do
+      out[i] = { type = kind or "D6", value = f, face = tostring(f) }
+    end
+    return out
+  end
+
+  -- Stamps `seq` and `t` on the event, JSON-encodes it, and hands the string
+  -- to `publish`. The caller fills `kind`, `action`, `fighter`, `dice` and
+  -- any per-kind extras; one call site = one `emit`.
+  function __nqs_mundane_bus.emit(event)
+    event.seq = __nqs_mundane_bus.nextSeq()
+    event.t = Time.time
+    __nqs_mundane_bus.publish(JSON.encode(event))
   end
 end
 
@@ -16675,6 +16705,39 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             struck, dice = {}, {}
         end
         onAttackRolled(player, res)
+        -- MI4a hit-roll publish. Fires once per attack from the only site
+        -- where the raw hit-roll faces are known: `faces` already carries any
+        -- re-rolls, Twin-Linked re-rolls and Cacophony re-rolls (see
+        -- `rerollHits` -> `thrown` -> `twin` -> `landed`), so what the recorder
+        -- sees is the attack's final hit-roll outcome rather than any
+        -- intermediate state. `attack.seq` is the per-attack chain id MI uses
+        -- across hit/wound/save, matching gang-roster's `attack_id`
+        -- convention (see game-recorder SPEC Channel 2 and gang-roster
+        -- src/roster.ttslua rollDice's `attackId` stamp). All variants hit
+        -- this: single-target shots, melee attacks, Template/Blast (whose
+        -- per-target spread then fans out through ACTIVATION.eachHit, which
+        -- carries no dice faces and is a target-dispatch site rather than a
+        -- roll-outcome site -- publishing from eachHit instead would miss
+        -- every single-target shot and every melee hit).
+        do
+            local __mi_dice = {}
+            for __i, __f in ipairs(faces) do
+                local __k = kinds[__i] or "d6"
+                __mi_dice[__i] = { type = __k == "firepower" and "FIREPOWER" or "D6",
+                                   value = __f, face = tostring(__f) }
+            end
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = "hit roll",
+                fighter = fighter and fighter.name or nil,
+                dice = __mi_dice,
+                direction = "gte",
+                weapon = name,
+                target = h and h.need or nil,
+                outcome = { passed = (res.hit or (res.hits or 0) > 0) and true or false },
+                attack_id = tostring(attack.seq),
+                player = tostring(color or player),
+            })
+        end
         -- a ranged hit on a selected enemy: it is Suppressed (Nerves Of Steel
         -- may save it), unless the weapon is Smoke; Cursed and Flash have
         -- their say
@@ -17653,6 +17716,39 @@ function ACTIVATION.woundRoll(seq, player)
         ACTIVATION.showDice(roll)
         onWoundsRolled(player, { plan = plan, plans = list, faces = faces, need = ACTIVATION.planNeed(plan), wounds = n,
                                  total = total, round = seq.blazed and 2 or 1, blaze = #gen, digital = digital })
+        -- MI4a wound-roll publish. One event per `woundRoll` landing;
+        -- Blaze (N+) re-enters this same function via `blazeRound`, which
+        -- means each Blaze round publishes its own `wound roll` event too --
+        -- a shape the recorder can group by `attack_id`. `plan.target` is the
+        -- primary target's name (first in `list`); a Template with several
+        -- targets lands them all under one plan and the per-target split
+        -- lives in `plans[d.plan].target`, carried in `targets`. S/AP/L
+        -- fields match gang-roster's `strength`/`ap`/`lethality` so the
+        -- recorder's wound-roll shape is portable across both publishers.
+        do
+            local __mi_targets
+            if #list > 1 then
+                __mi_targets = {}
+                for __i, __q in ipairs(list) do
+                    __mi_targets[__i] = tostring(__q.target or "?")
+                end
+            end
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = "wound roll, " .. tostring(plan.weapon or seq.weapon or "Weapon"),
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+                direction = "gte",
+                weapon = tostring(plan.weapon or seq.weapon or "Weapon"),
+                target = ACTIVATION.planNeed(plan),
+                outcome = { passed = n > 0 },
+                strength = plan.s, ap = plan.ap, lethality = plan.l,
+                target_fighter = tostring(plan.target or "?"),
+                targets = __mi_targets,
+                blaze_round = seq.blazed and true or nil,
+                attack_id = tostring(seq.attackSeq),
+                player = tostring(colorOf and colorOf(player) or player),
+            })
+        end
         if #gen > 0 then
             ACTIVATION.later(roll, function() ACTIVATION.blazeRound(seq, gen, total, per, player) end)
         else
@@ -18225,6 +18321,30 @@ function ACTIVATION.rollSaves(t, cover, player)
                                 inv = v0, cover = cover, ap = ap, burnt = burnt and burnt.name or nil,
                                 precise = some or nil,
                                 by = t.by, weapon = t.weapon, digital = digital })
+        -- MI4a save-roll publish. One event per `rollSaves` landing, before
+        -- `ACTIVATION.damage` so the recorder sees the save result ahead of
+        -- the damage that follows it in-chain. Target fighter is this
+        -- card's own `fighter` (saves land on the defender -- unlike hit/wound
+        -- which publish from the attacker's card). The attack_id matches the
+        -- attacker's hit/wound chain via `t.attackSeq` the attacker's
+        -- `woundRoll` plans stamped on `t` when it dispatched to this card.
+        do
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = "save",
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+                direction = "gte",
+                weapon = tostring(t.weapon or "Weapon"),
+                target = needOf(1),
+                outcome = { passed = through == 0 },
+                saved = saved, through = through, cover = cover, ap = ap,
+                inv = v0,
+                burnt = burnt and burnt.name or nil,
+                attack_id = tostring(t.attackSeq or ""),
+                attacker = tostring(t.by or ""),
+                player = tostring(colorOf and colorOf(player) or player),
+            })
+        end
         ACTIVATION.damage(t, failed, shown, player)
     end, "d6", title)
     return true
