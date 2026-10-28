@@ -1,0 +1,113 @@
+{
+  "AltLookAngle": {
+    "x": 0,
+    "y": 0,
+    "z": 0
+  },
+  "AttachedSnapPoints": [
+    {
+      "Position": {
+        "x": 2.25,
+        "y": 0.25,
+        "z": 0
+      },
+      "Rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "Position": {
+        "x": 0,
+        "y": 0.25,
+        "z": 0
+      },
+      "Rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "Position": {
+        "x": -2.25,
+        "y": 0.25,
+        "z": 0
+      },
+      "Rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      }
+    }
+  ],
+  "Autoraise": true,
+  "ColorDiffuse": {
+    "b": 1,
+    "g": 1,
+    "r": 1
+  },
+  "CustomMesh": {
+    "CastShadows": true,
+    "ColliderURL": "",
+    "Convex": true,
+    "CustomShader": {
+      "FresnelStrength": 0.107142858,
+      "SpecularColor": {
+        "b": 1,
+        "g": 0,
+        "r": 0.773234367
+      },
+      "SpecularIntensity": 0.15,
+      "SpecularSharpness": 4
+    },
+    "DiffuseURL": "https://steamusercontent-a.akamaihd.net/ugc/14890658336041348271/4D21F0A4350D3B6FA6DF7C1FE3589711298A58FB/",
+    "MaterialIndex": 1,
+    "MeshURL": "https://steamusercontent-a.akamaihd.net/ugc/16796026091007325782/D22F6070E3C4E51376D8CA05782648DF45EB0B47/",
+    "NormalURL": "https://steamusercontent-a.akamaihd.net/ugc/14637206178544796017/831911B6782F293B04D873D0753426D3F66BA7E9/",
+    "TypeIndex": 0
+  },
+  "CustomUIAssets": [
+    {
+      "Name": "mundanePanelBg",
+      "Type": 0,
+      "URL": "https://steamusercontent-a.akamaihd.net/ugc/12352082712112839381/58ABA6CE8570F5CB9E72C7E53BE4BE3A2CD8C9F7/"
+    }
+  ],
+  "Description": "Please, do not include this tool in your mods without my permission. It is NOT finished and requires ongoing fixes\n\n- Import fighter data from MundaManager\n- Adjust colors for your models by putting them on the 3 pedestals\n- Supply your own hosted background image if you want\n- Format of the background image must be 2:1 (length x height)",
+  "DragSelectable": true,
+  "GMNotes": "",
+  "GUID": "e4e1fb",
+  "Grid": true,
+  "GridProjection": false,
+  "Hands": false,
+  "HideWhenFaceDown": false,
+  "IgnoreFoW": false,
+  "LayoutGroupSortIndex": 0,
+  "Locked": false,
+  "LuaScriptState_path": "MundaneImporterN26byAntares77.e4e1fb.luascriptstate",
+  "LuaScript_path": "tool.lua",
+  "MeasureMovement": false,
+  "Name": "Custom_Model",
+  "Nickname": "Mundane Importer (N26) by Antares77",
+  "Snap": true,
+  "Sticky": true,
+  "Tags": [
+    "Mundane Importer"
+  ],
+  "Tooltip": true,
+  "Transform": {
+    "posX": 0.005,
+    "posY": 0.96,
+    "posZ": -8.844,
+    "rotX": 0,
+    "rotY": 180,
+    "rotZ": 0,
+    "scaleX": 1,
+    "scaleY": 1,
+    "scaleZ": 1
+  },
+  "Value": 0,
+  "XmlUI": ""
+}

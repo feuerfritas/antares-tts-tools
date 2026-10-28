@@ -1,0 +1,95 @@
+{
+  "AltLookAngle": {
+    "x": 0,
+    "y": 0,
+    "z": 0
+  },
+  "Autoraise": true,
+  "ColorDiffuse": {
+    "b": 1,
+    "g": 1,
+    "r": 1
+  },
+  "CustomMesh": {
+    "CastShadows": true,
+    "ColliderURL": "https://steamusercontent-a.akamaihd.net/ugc/16769865050255361543/793AEF157BF725762C793CE67389EE8AFE3D3C7D/",
+    "Convex": true,
+    "CustomShader": {
+      "FresnelStrength": 0,
+      "SpecularColor": {
+        "b": 1,
+        "g": 1,
+        "r": 1
+      },
+      "SpecularIntensity": 0,
+      "SpecularSharpness": 2
+    },
+    "DiffuseURL": "https://steamusercontent-a.akamaihd.net/ugc/9855393531996569598/51D8E61294A38BAF383976089CFF035513D3B88A/",
+    "MaterialIndex": 3,
+    "MeshURL": "https://steamusercontent-a.akamaihd.net/ugc/9389328415271718446/AC7846F324874AA04AD511ACBCA9F2AF23AA98FE/",
+    "NormalURL": "https://steamusercontent-a.akamaihd.net/ugc/13882180883202500431/6DF5DD0E9DB4AC56410C3ED7C279B0DF98080FEB/",
+    "TypeIndex": 4
+  },
+  "CustomUIAssets": [
+    {
+      "Name": "mundaneEdge",
+      "Type": 0,
+      "URL": "https://steamusercontent-a.akamaihd.net/ugc/13432909356284909624/B129FFCF81BACF983676DFEE7F7E71473280818C/"
+    },
+    {
+      "Name": "mundaneFrame",
+      "Type": 0,
+      "URL": "https://steamusercontent-a.akamaihd.net/ugc/14782607483565015523/5A66DA23DFB6BD38FFD1692D8E5F435717D1134D/"
+    },
+    {
+      "Name": "mundaneGear",
+      "Type": 0,
+      "URL": "https://steamusercontent-a.akamaihd.net/ugc/15954717134150489158/6BDE2A9CBC8AAB39A1F736EC3D0FE7F48135CB60/"
+    },
+    {
+      "Name": "mundaneGlow",
+      "Type": 0,
+      "URL": "https://steamusercontent-a.akamaihd.net/ugc/10558683540636189568/3D8BEC2610F94004B0610B97A0918B132C8CC70F/"
+    },
+    {
+      "Name": "mundaneDie",
+      "Type": 0,
+      "URL": "https://steamusercontent-a.akamaihd.net/ugc/12001738551517573707/F2E806437431BEE65DD78832C9C5A286D327A301/"
+    }
+  ],
+  "Description": "Please, do not include this tool in your mods without my permission. It is NOT finished and requires ongoing fixes!\n\n- Required for rolling dice from models\n- Automatic reminder for bottle checks\n- Bottle check LD automatic too\n- Advancing turns readies fighters\n- Homebrew options available",
+  "DragSelectable": true,
+  "GMNotes": "",
+  "GUID": "e27378",
+  "Grid": true,
+  "GridProjection": false,
+  "Hands": false,
+  "HideWhenFaceDown": false,
+  "IgnoreFoW": false,
+  "LayoutGroupSortIndex": 0,
+  "Locked": false,
+  "LuaScriptState_path": "MundaneControllerN26byAntares77.e27378.luascriptstate",
+  "LuaScript_path": "tool.lua",
+  "MeasureMovement": false,
+  "Name": "Custom_Model",
+  "Nickname": "Mundane Controller (N26) by Antares77",
+  "Snap": true,
+  "Sticky": true,
+  "Tags": [
+    "Mundane Controller"
+  ],
+  "Tooltip": true,
+  "Transform": {
+    "posX": 0,
+    "posY": 1.001,
+    "posZ": 3,
+    "rotX": 359,
+    "rotY": 180,
+    "rotZ": 0,
+    "scaleX": 1,
+    "scaleY": 1,
+    "scaleZ": 1
+  },
+  "Value": 0,
+  "XmlUI": ""
+}

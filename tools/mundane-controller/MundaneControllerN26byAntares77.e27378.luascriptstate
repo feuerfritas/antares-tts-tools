@@ -1,0 +1,22 @@
+{
+  "bottle": [],
+  "homebrew": [],
+  "rules": [],
+  "setup": {
+    "attacker": 1,
+    "deployTall": 1,
+    "deployTurn": 0,
+    "map": 36,
+    "rolled": []
+  },
+  "turn": 0,
+  "version": "3.0.0",
+  "vp": [
+    0,
+    0
+  ],
+  "vpNames": [
+    "Player 1",
+    "Player 2"
+  ]
+}
