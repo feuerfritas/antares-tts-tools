@@ -21,6 +21,48 @@
 --  the table, before this calls on every fighter.
 -- ==============================================================
 
+-- NQS fork, see TTSModfile.yaml `forked: true`:
+-- `__nqs_mundane_bus.publish(json)` is the publish-to-game-recorder helper
+-- the MR !27 ACTIVATION patches call from the gang-level event sites
+-- (bottle check, group activation open). The code is inlined here as the
+-- Mundane Importer (e4e1fb) carries an identical copy; see that file for
+-- the reasons we did not reach for `require(...)` -- any edit to the body
+-- must land in both copies in the same commit. See CHANGELOG.md
+-- [Unreleased] "Changed -- MI3".
+if __nqs_mundane_bus == nil then
+  __nqs_mundane_bus = { __seq = 0 }
+
+  function __nqs_mundane_bus.publish(json_string)
+    for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
+      pcall(obj.call, "bus_publish", json_string)
+    end
+  end
+
+  -- A monotonic per-publisher sequence number. See the Mundane Importer's
+  -- copy of this block for the full header.
+  function __nqs_mundane_bus.nextSeq()
+    __nqs_mundane_bus.__seq = __nqs_mundane_bus.__seq + 1
+    return __nqs_mundane_bus.__seq
+  end
+
+  function __nqs_mundane_bus.diceArray(faces, kind)
+    local out = {}
+    for i, f in ipairs(faces) do
+      out[i] = { type = kind or "D6", value = f, face = tostring(f) }
+    end
+    return out
+  end
+
+  -- No `stamp_guid` here: a Controller event is gang-level, not a
+  -- fighter's. See the Mundane Importer's copy for the full header.
+  function __nqs_mundane_bus.emit(event)
+    event.seq = __nqs_mundane_bus.nextSeq()
+    event.t = Time.time
+    if __nqs_mundane_bus.stamp_guid and event.guid == nil then event.guid = self.getGUID() end
+    __nqs_mundane_bus.publish(JSON.encode(event))
+  end
+end
+
 local CONTROLLER_NAME = "Mundane Controller"
 local VERSION         = "?"   -- the running version, handed over by the updater block
 
@@ -2444,10 +2486,12 @@ function SETUP.rollOff(k, color)
                 return SETUP.rollOff(k, color)
             end
             local win = faces[1] > faces[2] and 1 or 2
+            local was = SETUP.rolled[SETUP.ROWS[k].key]   -- NQS fork: for the recorder (below)
             SETUP.rolling[k] = nil
             SETUP.rolled[SETUP.ROWS[k].key] = win
             SETUP.draw(k)
             DICE.announce(string.format("%s%s chooses%s", CHAT_PREFIX, SETUP.side(win), how), SETUP.SAY)
+            if was ~= win then SETUP.busAttacker(color) end   -- NQS fork: see SETUP.busAttacker
         end })
 end
 
@@ -2875,8 +2919,10 @@ end
 function onVp(player, value, id)
     local n = tonumber(tostring(id or ""):match("^vpBtn_(%d)$"))
     if not (n and vp[n]) or not BOTTLE.named(n) then return end
+    local was = vp[n]                                                   -- NQS fork: for the recorder (below)
     vp[n] = math.max(0, vp[n] + (tostring(value) == "-2" and -1 or 1))
     setLabel("vpText_" .. n, tostring(vp[n]))
+    if vp[n] ~= was then SETUP.busVp(n, was, player and player.color or nil) end   -- NQS fork: see SETUP.busVp
 end
 
 -- A player's name typed in -- the gang whose Bottle Check that side shows
@@ -2890,6 +2936,7 @@ function onVpName(player, value, id)
     if name ~= BOTTLE.HINT and name:lower() ~= trim(tostring(vpNames[n])):lower() then
         vpNames[n] = name
         BOTTLE.hand[n] = nil
+        SETUP.busGang(n, player and player.color or nil)                -- NQS fork: see SETUP.busGang
     end
     BOTTLE.drawSide(n)
     SETUP.drawAll()
@@ -3080,8 +3127,10 @@ function BOTTLE.tick()
             BOTTLE.seen[n] = o
             local g = o and BOTTLE.gangName(o)
             if g then
+                local renamed = trim(tostring(vpNames[n])):lower() ~= trim(tostring(g)):lower()   -- NQS fork
                 vpNames[n] = g
                 BOTTLE.hand[n] = nil
+                if renamed then SETUP.busGang(n) end                    -- NQS fork: see SETUP.busGang
                 BOTTLE.drawSide(n)
                 SETUP.drawAll()
                 pcall(function() o.highlightOn({ 0.9, 0.8, 0.4 }, 1) end)
@@ -3209,6 +3258,15 @@ function DICE.spawn(req, kind)
             pcall(function()
                 obj.setName(DICE.NAMES[kind] or "D6")
                 obj.addTag(DICE.TAG)
+                -- NQS fork: dedup tag for the game-recorder's Type 2 observer,
+                -- which sees die spawns via onObjectSpawn and skips any
+                -- carrying this tag -- the bus-publish event already carries
+                -- the roll with its full game context (fighter, weapon,
+                -- action, faces), so the physical die is redundant. Shared
+                -- tag name with gang-roster's spawns on purpose: the observer
+                -- only needs to know WHETHER a sibling claimed the roll, not
+                -- WHO. See MR !27.
+                obj.addTag("gang-roster-roll")
                 if url == "" and req.color and stringColorToRGB then
                     local c = stringColorToRGB(req.color)
                     obj.setColorTint({ 0.45 + 0.55 * c.r, 0.45 + 0.55 * c.g, 0.45 + 0.55 * c.b })
@@ -3619,6 +3677,27 @@ function onBottleRoll(player, value, id)
         DICE.announce(string.format("[%s] Bottle Check (2D6): %d + %d = %d, %s%s", gang, faces[1], faces[2], total,
             verdict, digital and " (rolled digitally)" or ""),
             (target and total <= target) and { 0.3, 1, 0.4 } or { 1, 0.35, 0.3 })
+        -- MI4b-8 bottle-check bus publish. Gang-level 2D6 lte against the
+        -- gang's Ld (set by hand on BOTTLE.hand[n] or derived from the
+        -- highest-Ld fighter still on the table via BOTTLE.target). Published
+        -- from the Controller because the Bottle Check is a gang-level event,
+        -- not a per-fighter one -- the Controller holds the gang's Ld state
+        -- and names both sides. Natural 12 is the Necromunda "worst-case"
+        -- edge: two models leave rather than one.
+        __nqs_mundane_bus.emit({
+            kind = "roll", action = "bottle check",
+            gang = gang,
+            dice = __nqs_mundane_bus.diceArray({ faces[1], faces[2] }, "D6"),
+            direction = target and "lte" or nil,
+            target = target,
+            outcome = {
+                passed = target and (total <= target) or nil,
+                total = total,
+                natural_12 = (total == 12) and true or nil,
+                models_leaving = (target and total > target) and (total == 12 and 2 or 1) or nil,
+            },
+            player = color,
+        })
     end)
 end
 
@@ -3679,6 +3758,7 @@ function onAdvanceTurn(player, value, id)
         turn = math.max(0, turn - 1)
         drawTurn()
         if was == 1 then DEPLOY.again() end               -- back to the setup: the deployment's model too
+        if turn ~= was then SETUP.busRound(was, player and player.color or nil) end   -- NQS fork: see SETUP.busRound
         return
     end
     turn = turn + 1
@@ -3691,6 +3771,20 @@ function onAdvanceTurn(player, value, id)
     end
     printToAll(string.format("%sRound %d: %d fighter(s) readied%s.", CHAT_PREFIX, turn, n, updatedNote(up)),
         { 0.3, 1, 0.4 })
+    -- NQS fork: the round boundary on the game-recorder bus (agreed on
+    -- game-recorder !16, decision 3). The recorder takes `field ==
+    -- "ready_all"` as its primary round signal, so an N26 table marks its
+    -- rounds itself instead of falling back to Mark round. Forward only:
+    -- the right-click step back above returns before this, and is a
+    -- correction, not a round. Emitted after every card is readied, so the
+    -- cards' own actions_left events land first. Start Game (round 0 -> 1)
+    -- also says the game has started, first (game-recorder !19).
+    if turn == 1 then SETUP.busStart(player and player.color or nil) end
+    __nqs_mundane_bus.emit({
+        kind = "state_change", action = "ready_all", field = "ready_all",
+        round = turn, n = n,
+        player = player and player.color or nil,
+    })
 end
 
 -- A click on a setup row (setupBtn_<k>, see SETUP) -- Map Size: either
@@ -3707,19 +3801,24 @@ function onSetup(player, value, id)
         if not DEPLOY.remove() then DEPLOY.again() end
         return
     end
-    if row and row.map then return SETUP.nextMap(k) end                -- either mouse button
+    if row and row.map then                                             -- either mouse button
+        SETUP.nextMap(k)
+        return SETUP.busMap(player and player.color or nil)               -- NQS fork: see SETUP.busMap
+    end
     if not row or tostring(value) ~= "-1" or SETUP.rolling[k] then return end
     if row.rollOff then return SETUP.rollOff(k, player and player.color or nil) end
     if not row.results then return end
     SETUP.rolling[k] = true
     SETUP.draw(k)
     DICE.request({ kinds = { "d6" }, color = player and player.color or nil, done = function(faces, digital)
+        local was = SETUP.rolled[row.key]                               -- NQS fork: for the recorder (below)
         SETUP.rolling[k] = nil
         SETUP.rolled[row.key] = faces[1]
         SETUP.draw(k)
         DICE.announce(string.format("%s%s: %s%s", CHAT_PREFIX, row.say, row.results[faces[1]],
             digital and " (rolled digitally)" or ""), SETUP.SAY)
         if row.deploy then DEPLOY.spawn(faces[1], row.results[faces[1]]) end
+        if was ~= faces[1] then SETUP.busRow(k, player and player.color or nil) end   -- NQS fork: see SETUP.busRow
     end })
 end
 
@@ -3760,7 +3859,93 @@ end
 
 -- A left click on a side panel's Attacker / Defender: swapped.
 function onSwapRoles(player, value, id)
-    if tostring(value) == "-1" then SETUP.swap() end
+    if tostring(value) == "-1" then
+        SETUP.swap()
+        SETUP.busAttacker(player and player.color or nil)               -- NQS fork: see SETUP.busAttacker
+    end
+end
+
+-- ── NQS fork: the setup, the round and the points on the recorder's bus ──
+-- Agreed on game-recorder !19 (2026-10-26), its SPEC's "The Mundane
+-- Controller drives the record": this panel holds the game's setup, its
+-- round and both sides' points, so it publishes them, flat, through the
+-- __nqs_mundane_bus copy above. Each helper emits one event for the state
+-- the Controller holds NOW; the handlers call one only after a real change,
+-- with the clicking colour as `player` (nil for a scripted change), and
+-- publishState() calls every one of them with `replay = true`. One producer
+-- per shape, so a live change and a catch-up cannot drift apart. They are
+-- fields of SETUP rather than locals: no new chunk-level local.
+
+-- A rolled setup row (Deployment, Objective, Crews): its result as said
+-- ("Ambush") and the D6 it came up. Nothing for a row not rolled.
+function SETUP.busRow(k, color, replay)
+    local row = SETUP.ROWS[k]
+    local face = row and row.results and SETUP.rolled[row.key]
+    if not face then return end
+    __nqs_mundane_bus.emit({ kind = "setup", field = row.key, to = row.results[face], face = face,
+        player = color, replay = replay })
+end
+
+-- The map size, in inches a side.
+function SETUP.busMap(color, replay)
+    __nqs_mundane_bus.emit({ kind = "setup", field = "map", to = SETUP.map, player = color, replay = replay })
+end
+
+-- The side that attacks (1 left, 2 right), as the side panels show it, and
+-- its gang. The roll-off decides who CHOOSES, not who attacks, and changes
+-- no side's part; so after a roll-off this is the Attacker as it stands,
+-- and a swap that follows the winner's choice publishes the correction.
+function SETUP.busAttacker(color, replay)
+    __nqs_mundane_bus.emit({ kind = "setup", field = "attacker", to = SETUP.attacker,
+        gang = SETUP.side(SETUP.attacker), player = color, replay = replay })
+end
+
+-- Side `n`'s gang name.
+function SETUP.busGang(n, color, replay)
+    __nqs_mundane_bus.emit({ kind = "setup", field = "gang", side = n, to = trim(tostring(vpNames[n] or "")),
+        player = color, replay = replay })
+end
+
+-- Side `n`'s victory points, from `was` (nil in a replay: no change is told).
+function SETUP.busVp(n, was, color, replay)
+    __nqs_mundane_bus.emit({ kind = "state_change", field = "vp", side = n, from = was, to = vp[n],
+        player = color, replay = replay })
+end
+
+-- Start Game: round 1.
+function SETUP.busStart(color, replay)
+    __nqs_mundane_bus.emit({ kind = "setup", field = "start", round = 1, player = color, replay = replay })
+end
+
+-- The round stepped back (a right click), from `was` to the round now.
+function SETUP.busRound(was, color)
+    __nqs_mundane_bus.emit({ kind = "state_change", field = "round", from = was, to = turn, player = color })
+end
+
+-- The recorder's catch-up (game-recorder !19): everything above for the
+-- state this panel holds now, each with `replay = true`, so a recorder
+-- switched on mid-setup or mid-game gets the shapes it would have had live.
+-- It changes nothing. Called as obj.call("publishState") and DEFERRED A
+-- FRAME, so that call returns before the first event reaches the caller's
+-- bus_publish: no script-to-script re-entry. In a stable order: the rolled
+-- rows in the panel's order, then the map, the Attacker (once decided: the
+-- roll-off made, or the parts swapped from the default), the named sides'
+-- gangs, both sides' points, and the round -- `start` and then a
+-- `ready_all` carrying round = turn, without the `n` of a readying that did
+-- not happen, once the game has started. At round 0 the round says nothing.
+function publishState()
+    Wait.frames(function()
+        for k in ipairs(SETUP.ROWS) do SETUP.busRow(k, nil, true) end
+        SETUP.busMap(nil, true)
+        if SETUP.rolled.sides or SETUP.attacker ~= 1 then SETUP.busAttacker(nil, true) end
+        for n = 1, 2 do if BOTTLE.named(n) then SETUP.busGang(n, nil, true) end end
+        for n = 1, 2 do SETUP.busVp(n, nil, nil, true) end
+        if turn >= 1 then
+            SETUP.busStart(nil, true)
+            __nqs_mundane_bus.emit({ kind = "state_change", action = "ready_all", field = "ready_all",
+                round = turn, replay = true })
+        end
+    end, 1)
 end
 
 -- The Reset Fighters button as it stands: plain, red while it asks for the
@@ -4163,6 +4348,12 @@ function onLoad(saved)
     if next(RULES.active) then Wait.frames(RULES.push, 2) end
 end
 
+-- Fork pin: the SELF_UPDATE line below is false on purpose. It stays false until
+-- releases of this fork come from the composer pipeline; until then `!update`
+-- would replace the recorder-bus version with whatever REPO_BASE serves,
+-- unreviewed. scripts/validate.py accepts false only with this marker line:
+-- validate: SELF_UPDATE=false is intentional (fork pin)
+
 -- ===========================================================================
 -- Everything below this line is updater/updater.lua, pasted unchanged.
 -- ===========================================================================
@@ -4187,8 +4378,8 @@ end
 -- Stop Updates permanently: set SELF_UPDATE to false and nothing below ever runs.
 -- Adopting the block: set the three TOOL_ values.
 -- Forking the repo: change REPO_BASE, the only string here that names a host.
-local SELF_UPDATE    = true                    -- false pins this copy for good
-local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
+local SELF_UPDATE    = false
+local REPO_BASE      = "https://raw.githubusercontent.com/feuerfritas/antares-tts-tools/main"
 local TOOL_ID        = "mundane-controller"
 local TOOL_VERSION   = "3.0.0"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-controller"

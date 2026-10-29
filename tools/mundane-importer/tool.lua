@@ -28,6 +28,83 @@
 --  (CARD_SCRIPT).
 -- ==============================================================
 
+-- NQS fork, see TTSModfile.yaml `forked: true`:
+-- `__nqs_mundane_bus.publish(json)` is the publish-to-game-recorder helper
+-- the MR !27 ACTIVATION patches call from each resolve callback. The code
+-- is inlined here (not `require`d from `src/mundane_bus.ttslua`) because
+-- (1) ttsmm's luabundle integration hangs for 10+ minutes trying to bundle
+-- a `require(...)` into a 1.1 MB object script -- verified 2026-10-19 on
+-- commits for MI3 -- and (2) a local `Bus = require(...)` would add a
+-- local to this file's main chunk, which is close enough to Lua's 200-
+-- local ceiling that gang-roster hit it on the same move (see gang-roster
+-- commit e6e4d5b, `src/roster_bus.ttslua`'s header). Inlining the two
+-- functions on a global namespace sidesteps both. The Mundane Controller
+-- (e27378) carries an identical copy for the gang-level events (bottle
+-- check, group activation open) -- any edit here must land in that copy
+-- in the same commit. See CHANGELOG.md [Unreleased] "Changed -- MI3".
+--
+-- JSON STRING ACROSS THE BOUNDARY, NEVER A TABLE: TTS marshalling of a
+-- nested table silently drops it (homelab CLAUDE.md, cross-cuts). The
+-- ACTIVATION call sites `JSON.encode` their event with Antares' own `JSON`
+-- global before calling `publish`.
+if __nqs_mundane_bus == nil then
+  __nqs_mundane_bus = { __seq = 0 }
+
+  -- Finds every object tagged `gamerecorder` and hands it the event. No
+  -- recorder on the table is a no-op, not an error: MI's card UI works
+  -- identically without one. `pcall` degrades gracefully when the recorder
+  -- is present but something inside its `bus_publish` crashes -- a bus
+  -- event the recorder could not take in is still not a reason to break
+  -- MI's play, and MI's ACTIVATION callbacks run inside TTS's event loop
+  -- where an uncaught error would crash the handler.
+  function __nqs_mundane_bus.publish(json_string)
+    for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
+      pcall(obj.call, "bus_publish", json_string)
+    end
+  end
+
+  -- A monotonic per-publisher sequence number. The recorder orders events
+  -- deterministically whether or not `Time.time` resolution ties. Each forked
+  -- object counts its own sequence; the recorder also stamps a receive-order
+  -- seq of its own (see game-recorder SPEC Channel 2 for the ordering rules).
+  function __nqs_mundane_bus.nextSeq()
+    __nqs_mundane_bus.__seq = __nqs_mundane_bus.__seq + 1
+    return __nqs_mundane_bus.__seq
+  end
+
+  -- `faces` (plain list of face values) -> gang-roster's dice-array shape,
+  -- SPEC's "Rolls" section: one entry per die, `{type, value, face}` in roll
+  -- order. `kind` overrides the default "D6"; a non-D6 roll (FIREPOWER die,
+  -- Injury dice) names its own kind, matching gang-roster's `Rolls.DICE` keys.
+  function __nqs_mundane_bus.diceArray(faces, kind)
+    local out = {}
+    for i, f in ipairs(faces) do
+      out[i] = { type = kind or "D6", value = f, face = tostring(f) }
+    end
+    return out
+  end
+
+  -- Stamps `seq` and `t` on the event, JSON-encodes it, and hands the string
+  -- to `publish`. The caller fills `kind`, `action`, `fighter`, `dice` and
+  -- any per-kind extras; one call site = one `emit`.
+  --
+  -- `guid` is the fighter's identity on the bus, `fighter` only its display
+  -- name (game-recorder SPEC, "MI as a bus publisher", amended on
+  -- game-recorder !16, 2026-10-26). The stamp is the publishing object's own
+  -- GUID, so it is only right where the publisher IS the fighter: the card.
+  -- This body stays byte-identical in all three copies, and the copies
+  -- differ only in their setup line -- the card's sets `stamp_guid = true`,
+  -- this one and the Controller's do not, because their events (the Bottle
+  -- Check, gang-level) belong to no fighter. A caller that already set
+  -- `guid` keeps it.
+  function __nqs_mundane_bus.emit(event)
+    event.seq = __nqs_mundane_bus.nextSeq()
+    event.t = Time.time
+    if __nqs_mundane_bus.stamp_guid and event.guid == nil then event.guid = self.getGUID() end
+    __nqs_mundane_bus.publish(JSON.encode(event))
+  end
+end
+
 local IMPORTER_NAME = "Mundane Importer"
 local VERSION       = "?"   -- the running version, handed over by the updater block
 
@@ -2267,6 +2344,60 @@ CARD_SCRIPT = [=[
      What is left of the game's rules (line of sight, what the other
      actions do) has its clearly marked stubs in the STUBS section.
 ========================================================================== ]]
+
+--@@PART 00a_nqs_bus.lua
+-- NQS fork, see TTSModfile.yaml `forked: true`. The fighter card runs its
+-- OWN copy of `__nqs_mundane_bus.publish/nextSeq/diceArray/emit`: this
+-- script is injected onto every fighter model at import time, and when
+-- its `ACTIVATION.attackDice.landed` / `ACTIVATION.woundRoll.landed` /
+-- `ACTIVATION.rollSaves` fire the three MI4a publish sites below, the
+-- card is in its own object script's environment with no reach to the
+-- Importer's top-level globals. The publisher is inlined (not required
+-- via a Workshop dep) for the same two reasons as the Importer's and
+-- Controller's copies: ttsmm's luabundle integration hangs on a
+-- `require(...)` into MI's 1.1 MB object script, and `local Bus =
+-- require(...)` would push MI's main chunk past Lua's 200-local ceiling.
+-- The three copies' function bodies stay byte-identical by rule; see
+-- CHANGELOG.md [Unreleased] "Added -- MI4a". Only the setup line differs:
+-- this copy sets `stamp_guid = true`, so `emit` stamps every event with
+-- `guid = self.getGUID()` -- the card IS the fighter (see the Importer's
+-- copy for why the other two do not). The `if __nqs_mundane_bus
+-- == nil then ...` guard keeps the block idempotent across cards that
+-- might share an env on reload.
+--
+-- JSON STRING ACROSS THE BOUNDARY, NEVER A TABLE: TTS marshalling of a
+-- nested table silently drops it (homelab CLAUDE.md, cross-cuts). The
+-- ACTIVATION call sites `JSON.encode` their event with Antares' own
+-- `JSON` global before calling `publish`.
+if __nqs_mundane_bus == nil then
+  __nqs_mundane_bus = { __seq = 0, stamp_guid = true }
+
+  function __nqs_mundane_bus.publish(json_string)
+    for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
+      pcall(obj.call, "bus_publish", json_string)
+    end
+  end
+
+  function __nqs_mundane_bus.nextSeq()
+    __nqs_mundane_bus.__seq = __nqs_mundane_bus.__seq + 1
+    return __nqs_mundane_bus.__seq
+  end
+
+  function __nqs_mundane_bus.diceArray(faces, kind)
+    local out = {}
+    for i, f in ipairs(faces) do
+      out[i] = { type = kind or "D6", value = f, face = tostring(f) }
+    end
+    return out
+  end
+
+  function __nqs_mundane_bus.emit(event)
+    event.seq = __nqs_mundane_bus.nextSeq()
+    event.t = Time.time
+    if __nqs_mundane_bus.stamp_guid and event.guid == nil then event.guid = self.getGUID() end
+    __nqs_mundane_bus.publish(JSON.encode(event))
+  end
+end
 
 --@@PART 00b_model.lua
 --============================================================================
@@ -14211,6 +14342,24 @@ function setStatus(key)
     -- no other goes back to Active
     if def.key == "seriously_injured" and before ~= def.key then checkEngagement() end
     onStatusChanged(def.key, def.label)
+    -- MI4b-2 state_change publish on status transition. The three
+    -- gang-roster-canonical statuses it reaches are `active`, `pinned`,
+    -- `prone`, `engaged`, `seriously_injured` -- plus Antares' own
+    -- additions (`suppressed`, `webbed`, ...). The recorder reads this
+    -- shape as "fighter's `status` field changed from <before> to <to>",
+    -- same as gang-roster's own `State.statusLine` publish. Only emits
+    -- when the status actually changes; a no-op setStatus (same key)
+    -- publishes nothing, keeping the bus quiet during UI re-renders.
+    if def.key ~= before then
+        __nqs_mundane_bus.emit({
+            kind = "state_change", action = "status",
+            fighter = fighter and fighter.name or nil,
+            field = "status",
+            from = before,
+            to = def.key,
+            label = def.label,
+        })
+    end
     return def.key
 end
 
@@ -14460,6 +14609,27 @@ function getActivation()
              readyMarks = fighter.readyMarks }
 end
 
+-- NQS fork (game-recorder !16): the stat block as the card shows it, as a
+-- JSON string -- { M = '5"', WS = "6+", I = "2", ... } -- for the recorder,
+-- which neither can nor should recompute what statMod sums. Every value is
+-- the card's own statText, in the context the card itself uses for "the
+-- save alone" (TRAIT_RULES.saveContext: a Shield / Parry's better save) --
+-- what every copy shows with no weapon popup open. A popup's own context
+-- (an Unwieldy weapon's I, Combi's BS) belongs to the player who opened it
+-- and is left out. A number clicked but not kept yet (pendingStats) shows,
+-- as it does on the card. "-" for a stat with none. A string, not a table: a
+-- nested table does not cross a script boundary. GR_SHOWN_STATS lets a
+-- reader test for this accessor with getVar before calling it -- an
+-- obj.call to a function an older card lacks logs an error nothing catches.
+GR_SHOWN_STATS = true
+function getShownStats()
+    local out = {}
+    for _, key in ipairs({ "M", "WS", "BS", "S", "T", "W", "I", "A", "Ld", "Cl", "Wil", "Int", "Sv" }) do
+        out[key] = statText(key, TRAIT_RULES.saveContext())
+    end
+    return JSON.encode(out)
+end
+
 -- Group activated (true): a friend's passed Group Activation takes this
 -- fighter along -- it may activate once that friend has finished -- shown
 -- by CFG.groupMark after its name until it activates (or the round ends,
@@ -14526,6 +14696,24 @@ function setOutOfAction(on)
     end
     ACTIVATION.gangMoved()
     ACTIVATION.tellController(not on)
+    -- MI4b-2 state_change publish on Out-of-Action transition. One of the
+    -- two round-ending fates for a fighter (the other is a passed Recovery
+    -- test, handled in setStatus's own publish above). `why` carries the
+    -- reason text ("every Injury dice Out of Action", "Injury dice from Kal's
+    -- Autogun", ...) so the recorder can tie an OOA back to the attack chain
+    -- that caused it without needing the attacker's card to publish a
+    -- separate "took OOA" event. `out_cold` is set when it is a non-lethal
+    -- knockout (gang-roster has no corresponding field; the recorder
+    -- consumes it as an optional enrichment).
+    __nqs_mundane_bus.emit({
+        kind = "state_change", action = "out_of_action",
+        fighter = fighter and fighter.name or nil,
+        field = "out_of_action",
+        from = not on,
+        to = on,
+        out_cold = fighter and fighter.outCold or nil,
+        why = why,
+    })
     return on
 end
 
@@ -14990,6 +15178,25 @@ function setCondition(key, n)
         ACTIVATION.wyrdDraw()
     end
     if n ~= before then onConditionChanged(key, n, before) end
+    -- MI4b-2 state_change publish on condition transition. gang-roster
+    -- publishes one `kind=state_change, action="condition"` per flip
+    -- (Blind on/off, Suppressed stacks changing, Feared on/off, etc).
+    -- `stacks` carries the count for conditions that stack (Concussive's
+    -- Concussion up to N); unstacking conditions use 0 or 1. Only emits
+    -- on actual change; a no-op setCondition (n == before) publishes
+    -- nothing.
+    if n ~= before then
+        __nqs_mundane_bus.emit({
+            kind = "state_change", action = "condition",
+            fighter = fighter and fighter.name or nil,
+            field = "condition",
+            key = tostring(key),
+            label = CONDITIONS[i] and CONDITIONS[i].label or nil,
+            from = before,
+            to = n,
+            stacks = (CONDITIONS[i] and CONDITIONS[i].stacks) and true or false,
+        })
+    end
     return n
 end
 
@@ -15276,10 +15483,12 @@ end
 -- It also drops any hand-set number for the stat.
 function setStat(key, value)
     key, value = keyValue(key, value)
+    local was = fighter.stats[key]                -- NQS fork: for the bus, below
     fighter.stats[key] = value
     fighter.statEdits[key] = nil
     pendingStats[key] = nil
     refresh()
+    __nqs_mundane_bus.statChanged("statline", key, was, value)
     return true
 end
 
@@ -15310,6 +15519,7 @@ end
 -- (light blue), or plain again when it is the statline's own. Returns the
 -- number.
 function keepStat(key)
+    local was = statKept(key)                     -- NQS fork: for the bus, below
     local n = statBase(key)
     pendingStats[key] = nil
     if n then
@@ -15317,6 +15527,7 @@ function keepStat(key)
         fighter.statEdits[key] = n ~= statOriginal(key) and n or nil
     end
     ui.drawStats()
+    __nqs_mundane_bus.statChanged("stat", key, was, statKept(key))
     return n
 end
 
@@ -15326,9 +15537,11 @@ end
 function stepStat(key)
     local n = steppedStat(key, 1)
     if not n then return nil end
+    local was = statKept(key)                     -- NQS fork: for the bus, below
     pendingStats[key] = nil
     fighter.statEdits[key] = n ~= statOriginal(key) and n or nil
     ui.drawStats()
+    __nqs_mundane_bus.statChanged("stat", key, was, statKept(key))
     return n
 end
 end
@@ -15548,6 +15761,14 @@ function throwDice(n, color, done, kind, label)
             rotation = { math.random(0, 359), math.random(0, 359), math.random(0, 359) },
             callback_function = function(o)
                 if color and stringColorToRGB then o.setColorTint(stringColorToRGB(color)) end
+                -- NQS fork: dedup tag for the game-recorder's Type 2 observer,
+                -- which sees die spawns via onObjectSpawn and skips any carrying
+                -- this tag -- the bus-publish event already carries the roll
+                -- with its full game context (fighter, weapon, action, faces),
+                -- so the physical die is redundant. Shared tag name with gang-
+                -- roster's spawns on purpose: the observer only needs to know
+                -- WHETHER a sibling claimed the roll, not WHO. See MR !27.
+                o.addTag("gang-roster-roll")
                 d.kick = ACTIVATION.tumble(o, CFG.diceSpin, CFG.dicePush)
             end,
         })
@@ -15680,6 +15901,44 @@ function ACTIVATION.rollTest(key, player, o)
         ACTIVATION.showDice{ title = test.natural and "Perils of the Warp!" or title, kind = "d6", faces = faces,
                              hl = ACTIVATION.checkInk(test), sum = not test.target and ("∑" .. total) or nil }
         onStatRoll(player, test)
+        -- MI4b-3 stat-test / stat-roll bus publish. Reached for every
+        -- `<Stat> Check` (2D6 lte for Ld/Cl/Wil/Int, 1D6 lte for S/T/I)
+        -- and every stat-only roll (M, A -- no target, no pass/fail).
+        -- Shape maps to gang-roster's `action = "<Stat> check"` for the
+        -- `test.under == true` branch (lte checks) and `"<Stat> roll"`
+        -- for the stat-only branch. `natural` captures the 2 / 12 edge
+        -- cases for the Perils of the Warp casting rules. `why` passes
+        -- `o.why` through so the recorder sees "Fearsome", "Nerve",
+        -- "Spring Up" etc as the reason this check was made.
+        do
+            local __stat_names = { Cl = "Cool", Ld = "Leadership", Wil = "Willpower",
+                                   Int = "Intelligence", S = "Strength", T = "Toughness",
+                                   I = "Initiative", Sv = "Save", Inv = "Invulnerable save" }
+            local __action
+            if test.target == nil then
+                __action = (__stat_names[key] or key) .. " roll"
+            else
+                __action = (__stat_names[key] or key) .. " check"
+            end
+            local __outcome
+            if test.target ~= nil then
+                __outcome = { passed = test.passed and true or false, total = test.total }
+                if test.natural then __outcome.natural = test.natural end
+            else
+                __outcome = { total = test.total }
+            end
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = __action,
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+                direction = test.target and (test.under and "lte" or "gte") or nil,
+                stat = key,
+                target = test.target,
+                outcome = __outcome,
+                why = o.why or nil,
+                player = tostring(color or player),
+            })
+        end
         if o.done then o.done(test, ACTIVATION.roll) end
     end, "d6", title)
     return test
@@ -15756,6 +16015,18 @@ function rollDice(n, player)
         for _, f in ipairs(faces) do total = total + f end
         ACTIVATION.say(string.format("Roll %dD6", n), faces, total, { color = color, digital = digital })
         ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, sum = "∑" .. total }
+        -- MI4b-6 standalone D6 roll publish (Special tab's "Roll Dice" button
+        -- or external obj.call). No semantic context -- just dice and their
+        -- sum. The recorder treats this as a non-chain roll with
+        -- `action = "d6 roll"`, which the webplayer can still render as "the
+        -- fighter picked up N dice and the player read them".
+        __nqs_mundane_bus.emit({
+            kind = "roll", action = "d6 roll",
+            fighter = fighter and fighter.name or nil,
+            dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+            outcome = { total = total },
+            player = tostring(color or player),
+        })
     end, "d6", title)
     return true
 end
@@ -15786,6 +16057,19 @@ function rollFirepower(n, player)
         ACTIVATION.showDice{ title = title, kind = "firepower", faces = faces, sumInk = hits > 0 and COL.valueUp or COL.valueMod,
                              sum = "∑" .. hits, ammoState = ACTIVATION.ammoState(checks) }
         onFirepowerRolled(player, { face = faces[1], faces = faces, hits = hits, ammo = ammo })
+        -- MI4b-6 standalone firepower-roll publish (Special tab's "Roll
+        -- Firepower" button). In-attack firepower dice are already folded
+        -- into MI4a's hit-roll `dice` array (the FIREPOWER kinds in the
+        -- middle of `faces`), so this is for the loose roll with no attack
+        -- context. `action = "firepower"` + FIREPOWER-typed dice; outcome
+        -- carries hits and the ammo-check flag.
+        __nqs_mundane_bus.emit({
+            kind = "roll", action = "firepower",
+            fighter = fighter and fighter.name or nil,
+            dice = __nqs_mundane_bus.diceArray(faces, "FIREPOWER"),
+            outcome = { hits = hits, ammo_checks = checks, ammo_fired = ammo and true or false },
+            player = tostring(color or player),
+        })
     end, "firepower", title)
     return true
 end
@@ -15821,6 +16105,28 @@ function rollInjuries(n, player)
             setOutOfAction{ value = true, why = "every Injury dice Out of Action" }
         end
         onInjuriesRolled(player, results, faces)
+        -- MI4b injury-roll publish, standalone variant (Special tab / obj.call
+        -- entry: there is no weapon context and no attack_id to tie it to).
+        -- The in-chain variant inside ACTIVATION.injure carries both; this one
+        -- carries the dice + outcome counts for the recorder's distribution
+        -- analysis. Standalone injury rolls are rare enough that an untied
+        -- event is honest -- there is no attack chain to group them with.
+        do
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = "injury roll",
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "INJURY"),
+                outcome = {
+                    out = count.out or 0,
+                    serious = count.serious or 0,
+                    injured = count.injured or 0,
+                    worst = worst,
+                    best = best,
+                    out_of_action = (count.out == #faces) and true or false,
+                },
+                player = tostring(color or player),
+            })
+        end
     end, "injury", title)
     return true
 end
@@ -16631,6 +16937,39 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             struck, dice = {}, {}
         end
         onAttackRolled(player, res)
+        -- MI4a hit-roll publish. Fires once per attack from the only site
+        -- where the raw hit-roll faces are known: `faces` already carries any
+        -- re-rolls, Twin-Linked re-rolls and Cacophony re-rolls (see
+        -- `rerollHits` -> `thrown` -> `twin` -> `landed`), so what the recorder
+        -- sees is the attack's final hit-roll outcome rather than any
+        -- intermediate state. `attack.seq` is the per-attack chain id MI uses
+        -- across hit/wound/save, matching gang-roster's `attack_id`
+        -- convention (see game-recorder SPEC Channel 2 and gang-roster
+        -- src/roster.ttslua rollDice's `attackId` stamp). All variants hit
+        -- this: single-target shots, melee attacks, Template/Blast (whose
+        -- per-target spread then fans out through ACTIVATION.eachHit, which
+        -- carries no dice faces and is a target-dispatch site rather than a
+        -- roll-outcome site -- publishing from eachHit instead would miss
+        -- every single-target shot and every melee hit).
+        do
+            local __mi_dice = {}
+            for __i, __f in ipairs(faces) do
+                local __k = kinds[__i] or "d6"
+                __mi_dice[__i] = { type = __k == "firepower" and "FIREPOWER" or "D6",
+                                   value = __f, face = tostring(__f) }
+            end
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = "hit roll",
+                fighter = fighter and fighter.name or nil,
+                dice = __mi_dice,
+                direction = "gte",
+                weapon = name,
+                target = h and h.need or nil,
+                outcome = { passed = (res.hit or (res.hits or 0) > 0) and true or false },
+                attack_id = tostring(attack.seq),
+                player = tostring(color or player),
+            })
+        end
         -- a ranged hit on a selected enemy: it is Suppressed (Nerves Of Steel
         -- may save it), unless the weapon is Smoke; Cursed and Flash have
         -- their say
@@ -17609,6 +17948,39 @@ function ACTIVATION.woundRoll(seq, player)
         ACTIVATION.showDice(roll)
         onWoundsRolled(player, { plan = plan, plans = list, faces = faces, need = ACTIVATION.planNeed(plan), wounds = n,
                                  total = total, round = seq.blazed and 2 or 1, blaze = #gen, digital = digital })
+        -- MI4a wound-roll publish. One event per `woundRoll` landing;
+        -- Blaze (N+) re-enters this same function via `blazeRound`, which
+        -- means each Blaze round publishes its own `wound roll` event too --
+        -- a shape the recorder can group by `attack_id`. `plan.target` is the
+        -- primary target's name (first in `list`); a Template with several
+        -- targets lands them all under one plan and the per-target split
+        -- lives in `plans[d.plan].target`, carried in `targets`. S/AP/L
+        -- fields match gang-roster's `strength`/`ap`/`lethality` so the
+        -- recorder's wound-roll shape is portable across both publishers.
+        do
+            local __mi_targets
+            if #list > 1 then
+                __mi_targets = {}
+                for __i, __q in ipairs(list) do
+                    __mi_targets[__i] = tostring(__q.target or "?")
+                end
+            end
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = "wound roll, " .. tostring(plan.weapon or seq.weapon or "Weapon"),
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+                direction = "gte",
+                weapon = tostring(plan.weapon or seq.weapon or "Weapon"),
+                target = ACTIVATION.planNeed(plan),
+                outcome = { passed = n > 0 },
+                strength = plan.s, ap = plan.ap, lethality = plan.l,
+                target_fighter = tostring(plan.target or "?"),
+                targets = __mi_targets,
+                blaze_round = seq.blazed and true or nil,
+                attack_id = tostring(seq.attackSeq),
+                player = tostring(colorOf and colorOf(player) or player),
+            })
+        end
         if #gen > 0 then
             ACTIVATION.later(roll, function() ACTIVATION.blazeRound(seq, gen, total, per, player) end)
         else
@@ -18181,6 +18553,30 @@ function ACTIVATION.rollSaves(t, cover, player)
                                 inv = v0, cover = cover, ap = ap, burnt = burnt and burnt.name or nil,
                                 precise = some or nil,
                                 by = t.by, weapon = t.weapon, digital = digital })
+        -- MI4a save-roll publish. One event per `rollSaves` landing, before
+        -- `ACTIVATION.damage` so the recorder sees the save result ahead of
+        -- the damage that follows it in-chain. Target fighter is this
+        -- card's own `fighter` (saves land on the defender -- unlike hit/wound
+        -- which publish from the attacker's card). The attack_id matches the
+        -- attacker's hit/wound chain via `t.attackSeq` the attacker's
+        -- `woundRoll` plans stamped on `t` when it dispatched to this card.
+        do
+            __nqs_mundane_bus.emit({
+                kind = "roll", action = "save",
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+                direction = "gte",
+                weapon = tostring(t.weapon or "Weapon"),
+                target = needOf(1),
+                outcome = { passed = through == 0 },
+                saved = saved, through = through, cover = cover, ap = ap,
+                inv = v0,
+                burnt = burnt and burnt.name or nil,
+                attack_id = tostring(t.attackSeq or ""),
+                attacker = tostring(t.by or ""),
+                player = tostring(colorOf and colorOf(player) or player),
+            })
+        end
         ACTIVATION.damage(t, failed, shown, player)
     end, "d6", title)
     return true
@@ -18265,13 +18661,15 @@ function ACTIVATION.damage(t, failed, roll, player)
         if inj < 1 then return ACTIVATION.knockSelf(t, r) end
         ACTIVATION.later(r, function()
             ACTIVATION.injure(inj, from, player, { weapon = t.weapon, done = function(r2) ACTIVATION.knockSelf(t, r2) end,
-                                                   ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil })
+                                                   ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil,
+                                                   attack_id = t.attackSeq })
         end)
     end
     if pair then
         ACTIVATION.later(roll, function()
             ACTIVATION.injure(2, from, player, { weapon = t.weapon, best = boosted.name, done = rest,
-                                                 ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil })
+                                                 ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil,
+                                                 attack_id = t.attackSeq })
         end)
     else
         rest(roll)
@@ -18377,6 +18775,34 @@ function ACTIVATION.injure(n, from, player, o)
             setOutOfAction{ value = true, why = "Injury dice from " .. from }
         elseif worst == "serious" and fighter.status ~= "seriously_injured" then
             setStatus("seriously_injured")
+        end
+        -- MI4b injury-roll publish, in-chain variant (ACTIVATION.injure is
+        -- reached from ACTIVATION.damage after a wound goes through). Carries
+        -- the weapon that caused the damage (o.weapon) and -- when the caller
+        -- threaded it in `o.attack_id` -- the chain id that ties this
+        -- injury to the hit / wound / save already in the recorder's attack
+        -- group. The standalone rollInjuries site below publishes an
+        -- attack_id-less copy for Special-tab / obj.call entries. Shape
+        -- matches gang-roster's `action = "injury roll, <weapon>"` with
+        -- `dice.type = "INJURY"` (gang-roster SPEC's "Rolls" dice vocab).
+        do
+            __nqs_mundane_bus.emit({
+                kind = "roll",
+                action = o.weapon and ("injury roll, " .. tostring(o.weapon)) or "injury roll",
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "INJURY"),
+                weapon = o.weapon and tostring(o.weapon) or nil,
+                outcome = {
+                    out = count.out or 0,
+                    serious = count.serious or 0,
+                    injured = count.injured or 0,
+                    worst = worst,
+                    out_of_action = (worst == "out") and true or false,
+                },
+                attack_id = o.attack_id and tostring(o.attack_id) or nil,
+                attacker = from and tostring(from) or nil,
+                player = tostring(color or player),
+            })
         end
         if o.done and not fighter.outOfAction then o.done(shown) else ended() end
     end, "injury", title)
@@ -18514,6 +18940,22 @@ function ACTIVATION.reloadNow(list, player, o)
             setProfileState({ weapon = e.i, profile = e.pi, ammo = R.ammoNext(e.w, e.p, false) })
             if not seen[e.w] then seen[e.w], names[#names + 1] = true, { name = TRAIT_RULES.name(e.w) } end
             onReloadRolled(player, { weapon = e.i, profile = e.pi, reloaded = true })
+            -- MI4b-4 reload bus publish, no-Scarce branch (free reload). Matches
+            -- gang-roster's `kind=event, event="reloaded"` shape (SPEC's "Rolls"
+            -- section groups `out_of_ammo` and `reloaded` under event-kind rather
+            -- than state_change-kind because they are weapon-state transitions
+            -- with no numeric from/to -- just "the weapon is reloaded now").
+            do
+                local __wname = TRAIT_RULES.name(e.w)
+                __nqs_mundane_bus.emit({
+                    kind = "event", event = "reloaded",
+                    fighter = fighter and fighter.name or nil,
+                    weapon = __wname and tostring(__wname) or nil,
+                    profile = e.pi,
+                    scarce = false,
+                    player = tostring(colorOf and colorOf(player) or player),
+                })
+            end
         end
     end
     if #names > 0 and o.say then o.say(names) end
@@ -18536,6 +18978,30 @@ function ACTIVATION.reloadNow(list, player, o)
                     end
                     onReloadRolled(player, { weapon = e.i, profile = e.pi, face = f, need = s.need, reloaded = ok,
                                              digital = digital })
+                    -- MI4b-4 Scarce ammo-test publish: a reload with Scarce (N+)
+                    -- is a dice roll, N+ to reload, less-than-N stays OUT. Shape
+                    -- matches gang-roster's `action = "ammo test, <weapon>"`
+                    -- with `direction="gte"`, `target=N`. Unlike the no-Scarce
+                    -- branch (an event-kind "reloaded"), this one is `kind=roll`
+                    -- because dice land and the recorder's distribution
+                    -- analysis cares. On success it is followed by nothing on
+                    -- the bus (the state change is implicit in outcome.passed);
+                    -- on failure, the weapon stays OUT and nothing follows.
+                    do
+                        local __wname = TRAIT_RULES.name(e.w)
+                        __nqs_mundane_bus.emit({
+                            kind = "roll",
+                            action = __wname and ("ammo test, " .. tostring(__wname)) or "ammo test",
+                            fighter = fighter and fighter.name or nil,
+                            dice = __nqs_mundane_bus.diceArray({ f }, "D6"),
+                            direction = "gte",
+                            weapon = __wname and tostring(__wname) or nil,
+                            profile = e.pi,
+                            target = s.need,
+                            outcome = { passed = ok and true or false, reason = "scarce" },
+                            player = tostring(colorOf and colorOf(player) or player),
+                        })
+                    end
                 end
             end
             ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hls = hls, ammoDie = #scarce == 1 and 1 or nil,
@@ -19093,6 +19559,28 @@ function rollNerve(player)
             chat(string.format("%s keeps their nerve -- not Suppressed", fighter.name), rgbOf(COL.valueUp))
         end
         onNerveRolled(player, test)
+        -- MI4b-5 Nerve Check bus publish. `rollNerve` implements its own 2D6
+        -- lte Cl flow directly rather than routing through `rollTest`, so
+        -- MI4b-3's rollTest publish does NOT catch Nerve Checks on its own.
+        -- Shape mirrors a Cool-check `rollTest` publish for consistency, with
+        -- extra fields: `from` (whose Cl the check used -- "Boss's Cl" when
+        -- borrowed), `steel` (Nerves Of Steel's check against being
+        -- Suppressed), and `auto` (the Outcast Leader's auto-pass).
+        __nqs_mundane_bus.emit({
+            kind = "roll",
+            action = "Cool check",
+            fighter = fighter and fighter.name or nil,
+            dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+            direction = "lte",
+            stat = "Cl",
+            target = n.value,
+            outcome = { passed = test.passed and true or false, total = total,
+                        auto = test.auto, nerve = true,
+                        steel = n.steel and true or nil },
+            from = n.from,
+            why = n.title and tostring(n.title) ~= "Nerve Check" and tostring(n.title) or "Nerve Check",
+            player = tostring(color or player),
+        })
     end, "d6", title)
     return test
 end
@@ -19151,6 +19639,32 @@ function ACTIVATION.rollGroup(n, player)
         test.activated = {}
         for i, o in ipairs(taken) do test.activated[i] = o.name end
         onGroupRolled(player, test)
+        -- MI4b-5 Group Activation bus publish. Like `rollNerve`, this is a
+        -- 2D6 lte check that implements its own flow rather than routing
+        -- through `rollTest`, so MI4b-3's rollTest publish does NOT catch it.
+        -- `test.activated` carries the names of friends who were group-
+        -- activated by this check; `test.rerolled` carries the first-roll
+        -- total when a Cult Icon's `groupReroll` re-threw the check (then
+        -- `faces`/`total` are the second roll's). On failure, no friends
+        -- activate; on pass, every friend within range flips to Group
+        -- Activated.
+        __nqs_mundane_bus.emit({
+            kind = "roll",
+            action = "Leadership check",
+            fighter = fighter and fighter.name or nil,
+            dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+            direction = "lte",
+            stat = "Ld",
+            target = n.value,
+            outcome = { passed = test.passed and true or false, total = test.total,
+                        group_activation = true,
+                        rerolled = test.rerolled,
+                        activated = test.activated,
+                        activated_count = #test.activated,
+                        far_count = #far },
+            why = "Group Activation",
+            player = tostring(color or player),
+        })
     end
     ACTIVATION.rolling(title)
     throwDice(2, color, function(faces, digital)
@@ -21233,6 +21747,27 @@ function ACTIVATION.moveBy(a, player, rgb, head)
         end
         ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, lead = lead, sum = result, inline = true }
         chat(string.format('%s - %g"%s', head, sum, digital and " (rolled digitally)" or ""), rgb)
+        -- MI4b-5 move-distance publish: a Charge, Engage or any action whose
+        -- distance has a D6 in `a.distance` goes here, and the dice land in
+        -- `faces`. gang-roster's shape is `action="charge"` with `target="M+D6"`
+        -- for a 1-die move, `action="engage"` for 0-stat 1D6 moves, etc. --
+        -- MI's `a.key` already carries the matching action key. Only emits when
+        -- the roll actually involved dice (`#faces > 0`); a plain Move with
+        -- no dice has nothing to say to the recorder. `outcome.inches` is the
+        -- total distance (base + dice), which the recorder's post-game stats
+        -- can slice by charge length.
+        if #faces > 0 then
+            __nqs_mundane_bus.emit({
+                kind = "roll",
+                action = tostring(a.key or "move"),
+                fighter = fighter and fighter.name or nil,
+                dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+                direction = nil,
+                outcome = { inches = sum, base = total, dice_sum = sum - total },
+                label = a.label and tostring(a.label) or nil,
+                player = tostring(colorOf and colorOf(player) or player),
+            })
+        end
         return sum
     end
     if dice == 0 then return show({}) end
@@ -21536,6 +22071,39 @@ end
 --      hooks where the rest of the game's rules can go.
 --============================================================================
 
+-- NQS fork (game-recorder !16): what the card last published for the two
+-- hooks below that report only the value after a change, onWoundsChanged
+-- and onActionsChanged -- so they emit `from` as well as `to`, and only on
+-- a real change. Kept on the card's bus table rather than in a local: this
+-- chunk is near Lua's 200-local ceiling. setFighter is wrapped, not edited,
+-- to (re)seed it from every fighter the card takes on (load, reset), so the
+-- first change after a load has a `from` and a whole new fighter is not
+-- reported as a change of the old one's wounds.
+__nqs_mundane_bus.card = { setFighter = setFighter }
+
+-- NQS fork (game-recorder !16): a permanent stat change on the bus, from the
+-- three setters that make one (keepStat, stepStat: field "stat", the kept
+-- numbers; setStat: field "statline", the statline's own strings). Only on a
+-- real change. A function on the bus table, so the setters each gain two
+-- lines and the chunk gains no local.
+function __nqs_mundane_bus.statChanged(field, key, from, to)
+    if field == "statline" then
+        from, to = from ~= nil and tostring(from) or nil, to ~= nil and tostring(to) or nil
+    end
+    if from == to then return end
+    __nqs_mundane_bus.emit({
+        kind = "state_change", action = field,
+        fighter = fighter and fighter.name or nil,
+        field = field, key = tostring(key), from = from, to = to,
+    })
+end
+function setFighter(data)
+    local done = __nqs_mundane_bus.card.setFighter(data)
+    __nqs_mundane_bus.card.hp = fighter.wounds.current
+    __nqs_mundane_bus.card.actionsLeft = fighter.actionsLeft
+    return done
+end
+
 -- Fired after the status changes, whether picked on the card or by script.
 function onStatusChanged(key, label)
     -- STUB: apply what the status means, e.g. Engaged locking the fighter in
@@ -21553,6 +22121,19 @@ end
 -- or finished (0).
 function onActionsChanged(left)
     -- STUB: anything more an activation's actions do.
+    -- NQS fork: actionsLeft on the game-recorder bus (game-recorder !16).
+    -- `activation` rides along so a reader needs no second event; the
+    -- recorder diffs activation itself at keyframes.
+    local c, to = __nqs_mundane_bus.card, tonumber(left) or 0
+    if c.actionsLeft ~= nil and c.actionsLeft ~= to then
+        __nqs_mundane_bus.emit({
+            kind = "state_change", action = "actions_left",
+            fighter = fighter and fighter.name or nil,
+            field = "actions_left", from = c.actionsLeft, to = to,
+            activation = fighter and fighter.activation or nil,
+        })
+    end
+    c.actionsLeft = to
 end
 
 -- Fired when a condition's stacks change (C's panel, the bar under the
@@ -21567,6 +22148,16 @@ end
 function onWoundsChanged(current, max)
     -- STUB: anything more a change of wounds does. (Damage taken rolls its
     -- own Injury dice, see ACTIVATION.damage; wounds set by hand roll none.)
+    -- NQS fork: wounds on the game-recorder bus (game-recorder !16).
+    local c, to = __nqs_mundane_bus.card, tonumber(current) or 0
+    if c.hp ~= nil and c.hp ~= to then
+        __nqs_mundane_bus.emit({
+            kind = "state_change", action = "hp",
+            fighter = fighter and fighter.name or nil,
+            field = "hp", from = c.hp, to = to, max = tonumber(max),
+        })
+    end
+    c.hp = to
 end
 
 -- Fired by attackWith (a profile's attack button): attack = { weapon,
@@ -21838,6 +22429,12 @@ end
 ]=]
 --@@CARD_END
 
+-- Fork pin: the SELF_UPDATE line below is false on purpose. It stays false until
+-- releases of this fork come from the composer pipeline; until then `!update`
+-- would replace the recorder-bus version with whatever REPO_BASE serves,
+-- unreviewed. scripts/validate.py accepts false only with this marker line:
+-- validate: SELF_UPDATE=false is intentional (fork pin)
+
 -- ===========================================================================
 -- Everything below this line is updater/updater.lua, pasted unchanged.
 -- ===========================================================================
@@ -21862,8 +22459,8 @@ end
 -- Stop Updates permanently: set SELF_UPDATE to false and nothing below ever runs.
 -- Adopting the block: set the three TOOL_ values.
 -- Forking the repo: change REPO_BASE, the only string here that names a host.
-local SELF_UPDATE    = true                    -- false pins this copy for good
-local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
+local SELF_UPDATE    = false
+local REPO_BASE      = "https://raw.githubusercontent.com/feuerfritas/antares-tts-tools/main"
 local TOOL_ID        = "mundane-importer"
 local TOOL_VERSION   = "3.0.0"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-importer"

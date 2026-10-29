@@ -158,7 +158,7 @@ local TOOL_XML = [[
 -- Adopting the block: set the three TOOL_ values.
 -- Forking the repo: change REPO_BASE, the only string here that names a host.
 local SELF_UPDATE    = true                    -- false pins this copy for good
-local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
+local REPO_BASE      = "https://raw.githubusercontent.com/feuerfritas/antares-tts-tools/main"
 local TOOL_ID        = "test-tool"
 local TOOL_VERSION   = "1.4.0"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:test-tool"
