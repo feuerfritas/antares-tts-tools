@@ -1291,8 +1291,12 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --   billboard     true: every seated player has a card copy of their own,
 --                 turned to face them; false: one copy shared by all (see
 --                 the card's CFG), lighter on a big table.
+--   twoSided      true: one copy shared by all that reads from both faces
+--                 (a second one back to back with the first) and is never
+--                 turned, so it costs no turning at all; ignores billboard.
 RULES.cfg = {
     billboard     = true,
+    twoSided      = false,
     engageRange   = 1,
     nerveRanges   = { leader = 12, champion = 6 },
     nerveOutRange = 3,
@@ -1689,6 +1693,10 @@ local HOMEBREW = {
           offDesc = "Every player sees the fighter card turned to face them, with their own hover and flyouts.",
           desc = "One fighter card for everyone: it does not turn to face anyone, and hover, flyouts and compact view are shared. Lighter on big tables.",
           rules = { cfg = { billboard = false } } },
+        { id = "two_sided_card", off = "One-Sided Card", name = "Two-Sided Card", gameplay = true,
+          offDesc = "The fighter card is one face (per player or for all, as chosen above).",
+          desc = "One card for everyone with a face on each side, readable from either side and never turned. Overrides One Card For All.",
+          rules = { cfg = { billboard = false, twoSided = true } } },
         { id = "long_powers", off = "RAW Continuous Powers", name = "Long Continuous Powers",
           offDesc = "A Continuous Power lasts until the end of the Wyrd's activation (if not Maintain Control (S)).",
           desc = "A Continuous Power lasts until the end of the Wyrd's next activation.",

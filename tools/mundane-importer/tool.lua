@@ -2590,7 +2590,20 @@ local CFG = {
     -- player's game and makes their machine lay the card out again, so
     -- fewer, larger steps are kinder to slow machines and connections.
     -- With billboard = false there is one shared copy, turned `yaw` degrees.
+    -- twoSided: one shared copy that reads from both faces and is never
+    -- turned: a second copy, back to back with the first ("all" is its
+    -- front, "back" its back; see wantedViewers), so update() has no
+    -- facing work at all. billboard is ignored then.
+    -- faceRange / farCheck: with a billboard card, a copy whose player's
+    -- pointer is further than faceRange from the model is not turned
+    -- (0 = every copy is); who is far is looked at every farCheck seconds.
+    -- Tuning to verify live: the pointer stands in for the camera.
+    -- placeEvery: seconds between looks at the model's scale and height.
     billboard  = true,
+    twoSided   = false,
+    faceRange  = 0,
+    farCheck   = 0.5,
+    placeEvery = 2,
     standAngle = -60,
     faceOffset = 180,
     faceSmooth = 0.05,
@@ -4012,8 +4025,12 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --   billboard     true: every seated player has a card copy of their own,
 --                 turned to face them; false: one copy shared by all (see
 --                 the card's CFG), lighter on a big table.
+--   twoSided      true: one copy shared by all that reads from both faces
+--                 (a second one back to back with the first) and is never
+--                 turned, so it costs no turning at all; ignores billboard.
 RULES.cfg = {
     billboard     = true,
+    twoSided      = false,
     engageRange   = 1,
     nerveRanges   = { leader = 12, champion = 6 },
     nerveOutRange = 3,
@@ -10167,6 +10184,7 @@ do
 -- player (limited to CFG.visibility when that is set), each shown only to
 -- that player; otherwise -- or with nobody seated -- one shared copy, "all".
 function ui.wantedViewers()
+    if CFG.twoSided then return { "all", "back" } end   -- front and back of one shared card
     if CFG.billboard then
         local allowed = CFG.visibility ~= "" and ("|" .. CFG.visibility .. "|") or nil
         local keys = {}
@@ -10182,7 +10200,7 @@ end
 
 -- The player a copy turns to face ("all": the first player there is).
 function ui.facingPlayer(key)
-    if key == "all" then return Player.getPlayers()[1] end
+    if key == "all" or key == "back" then return Player.getPlayers()[1] end
     local p = Player[key]
     if p and p.seated then return p end
 end
@@ -10196,6 +10214,28 @@ function ui.yawFor(p, own)
     local ok, r = pcall(function() return p.getPointerRotation() end)
     if not ok or type(r) ~= "number" then return nil end
     return ((own or self.getRotation().y) - r) % 360 + CFG.faceOffset
+end
+
+-- Whether a copy's player is too far from the model to be worth turning it
+-- for (CFG.faceRange; 0 = never). The player's pointer stands in for the
+-- camera, which Lua can't read; looked at every CFG.farCheck seconds.
+function ui.isFar(key, p, now)
+    local range = tonumber(CFG.faceRange) or 0
+    if range <= 0 then return false end
+    ui.far = ui.far or {}
+    local f = ui.far[key]
+    if not f or now - f.at > (tonumber(CFG.farCheck) or 0.5) then
+        local far = false
+        local ok, pp = pcall(function() return p.getPointerPosition() end)
+        local okM, mp = pcall(function() return self.getPosition() end)
+        if ok and okM and pp and mp then
+            local dx, dz = pp.x - mp.x, pp.z - mp.z
+            far = dx * dx + dz * dz > range * range
+        end
+        f = { at = now, far = far }
+        ui.far[key] = f
+    end
+    return f.far
 end
 
 -- An angle difference folded into -180..180.
@@ -10565,15 +10605,22 @@ function ui.buildXml()
     local pos, size = ui.placement()
     ui.placed = pos .. "|" .. size          -- what update() compares a rescale with
     for _, key in ipairs(ui.viewers) do
-        local vis = key ~= "all" and key or CFG.visibility
+        local shared = key == "all" or key == "back"
+        local vis = not shared and key or CFG.visibility
+        -- The back of a two-sided card is the front turned over about the
+        -- card's own vertical: Euler(-a, 180, 0) is tilt(a) after that
+        -- turn (Unity applies Z, then X, then Y), so both faces share one
+        -- plane and read the right way round from their own side.
+        local tilt = key == "back" and string.format("%g 180 0", -CFG.standAngle)
+            or string.format("%g 0 0", CFG.standAngle)
         out[#out + 1] = string.format(
             '<Panel id="%s_mundaRoot" active="%s" position="%s" rotation="0 0 %.1f"' ..
             ' width="%d" height="%d" color="%s" raycastTarget="false"%s>' ..
-            '<Panel id="%s_mundaTilt" rotation="%g 0 0" scale="%s" width="%d" height="%d" color="%s"' ..
+            '<Panel id="%s_mundaTilt" rotation="%s" scale="%s" width="%d" height="%d" color="%s"' ..
             ' raycastTarget="false">',
             key, tostring(ui.visible), pos, view(key).yaw, LAY.cardW, LAY.cardH,
             COL.clear, vis ~= "" and string.format(' visibility="%s"', vis) or "",
-            key, CFG.standAngle, size, LAY.cardW, LAY.cardH, COL.clear)
+            key, tilt, size, LAY.cardW, LAY.cardH, COL.clear)
         local compact = view(key).compact == true
         out[#out + 1] = (content:gsub(' id="', ' id="' .. key .. '_')
                                 :gsub("@@FULL@@", tostring(not compact))
@@ -12057,7 +12104,7 @@ function update()
     -- building it from the XML: its elements aren't there to be set yet.
     if not ui.built or self.UI.loading then return end
     local now = os.clock()
-    if now - (ui.placeCheck or 0) > 1 then
+    if now - (ui.placeCheck or 0) > (tonumber(CFG.placeEvery) or 2) then
         ui.placeCheck = now
         ui.place()
     end
@@ -12065,7 +12112,7 @@ function update()
         ui.targetAt = now
         ACTIVATION.drawTarget()
     end
-    if not CFG.billboard then return end
+    if CFG.twoSided or not CFG.billboard then return end   -- nothing to turn
     local dt  = now - (ui.turnAt or 0)
     local every = tonumber(CFG.faceEvery) or 0.02
     if dt < (ui.still and (tonumber(CFG.faceIdle) or every) or every) then return end
@@ -12090,7 +12137,7 @@ function update()
     local still = own ~= nil
     for _, key in ipairs(ui.viewers) do
         local p   = ui.facing[key]
-        local yaw = own and p and ui.yawFor(p, own)
+        local yaw = own and p and not ui.isFar(key, p, now) and ui.yawFor(p, own)
         if yaw then
             local v = view(key)
             -- eased while far off, the last step all the way; sent a step at a
@@ -13028,7 +13075,7 @@ do
         local on = blast or (fighter.activation == "active" and not fighter.outOfAction)
         for _, key in ipairs(ui.viewers) do
             local v = view(key)
-            local objs = on and ACTIVATION.picked(key == "all" and ui.facingPlayer(key) or key, blast) or {}
+            local objs = on and ACTIVATION.picked((key == "all" or key == "back") and ui.facingPlayer(key) or key, blast) or {}
             local ids = {}
             for k, o in ipairs(objs) do
                 local ok, g = pcall(function() return o.getGUID() end)
