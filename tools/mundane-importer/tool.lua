@@ -2009,18 +2009,18 @@ end
 -- Import a roster without the panel, for another object or a test harness:
 --   obj.call("importRoster", {text = "<roster export>"})   (or {"<text>"}, or a bare string)
 -- obj.call hands the argument table over as the single argument, unpacked
--- by neither side, so both shapes are taken. Runs the same path as the
--- Import button. Returns the number of fighters put onto models (0 if none
--- matched) and the list of names with no model; on bad input or a parse
--- error, false and an error string.
+-- by neither side, so both shapes are taken. It also returns only the first
+-- value, so the result is one table. Runs the same path as the Import
+-- button. Returns {ok=true, applied=n, notFound={names with no model}}, or
+-- {ok=false, error="..."} on bad input or a parse error.
 function importRoster(args)
     local text = type(args) == "table" and (args.text or args[1]) or args
     if type(text) ~= "string" or text:match("^%s*$") then
-        return false, "importRoster: expected a non-empty roster text"
+        return { ok = false, error = "importRoster: expected a non-empty roster text" }
     end
     local applied, extra = runImport(text, nil)
-    if applied == nil then return false, extra end
-    return applied, extra
+    if applied == nil then return { ok = false, error = tostring(extra) } end
+    return { ok = true, applied = applied, notFound = extra }
 end
 
 -- The changes history: shown over the panel, and hidden again.
