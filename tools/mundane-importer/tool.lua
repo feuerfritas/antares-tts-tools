@@ -18132,12 +18132,17 @@ function ACTIVATION.rollSaves(t, cover, player)
         local each = {}
         for i, r in ipairs(read) do each[i] = mixed and string.format("%d (%s)", r.f, r.mark) or tostring(r.f) end
         local ap = apOf(1)
+        local aps, needs, apText, seenAp = {}, {}, {}, {}     -- per wound: Rending worsens only its own wound's AP
+        for i = 1, #faces do
+            aps[i], needs[i] = apOf(i), needOf(i)
+            if aps[i] > 0 and not seenAp[aps[i]] then seenAp[aps[i]], apText[#apText + 1] = true, tostring(aps[i]) end
+        end
         local some, all = false, true                -- Precision Shot on some / every wound
         for i = 1, #faces do some, all = some or precise(i) or false, all and precise(i) or false end
         -- the head: "Sv4+", "no Sv"; " w. AP -1, Cover +2 = 3+" what changes it; " / Inv 5+"
         local mods = {}
         if not all then
-            if ap > 0 and not proof then mods[#mods + 1] = "AP -" .. ap end
+            if #apText > 0 and not proof then mods[#mods + 1] = "AP -" .. table.concat(apText, "/-") end
             if cover > 0 then mods[#mods + 1] = "Cover +" .. cover end
         end
         local head = (not all and sv and not none) and string.format("Sv%d+", sv) or "no Sv"
@@ -18178,6 +18183,7 @@ function ACTIVATION.rollSaves(t, cover, player)
                              sum = through == 0 and "Saved" or "∑" .. through, sumInk = through == 0 and UP or MOD }
         local shown = ACTIVATION.roll
         onSavesRolled(player, { wounds = #faces, saved = saved, through = through, faces = faces, need = needOf(1),
+                                needs = needs, aps = aps,   -- each wound's own (Rending), as ap / need are the first's
                                 inv = v0, cover = cover, ap = ap, burnt = burnt and burnt.name or nil,
                                 precise = some or nil,
                                 by = t.by, weapon = t.weapon, digital = digital })
