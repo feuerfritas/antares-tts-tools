@@ -8982,6 +8982,7 @@ do
             return #SKILL.with("counterAttack") > 0 and 2 or 1
         end
         if not R.secondaryOk(w, p) then return nil end
+        if hasTrait(p, TRAIT.light) then return 1 end   -- Light: one attack, Two-Weapon Fighter or not
         local n = 1
         for _, it in ipairs(SKILL.with("secondary")) do
             n = math.max(n, math.floor(tonumber(it.secondary) or 1))
@@ -9533,6 +9534,9 @@ end
 -- TRAIT_RULES.steps). "A + 1" is the fighter's A (after conditions) plus
 -- one; Paired (N) adds N to it and to "A + N".
 local function meleeAttacks(p)
+    -- Pistols at Close Quarters: a Light weapon makes one attack, whatever the
+    -- fighter's A, skills or modifiers
+    if hasTrait(p, TRAIT.light) then return 1, "x1" end
     local step = TRAIT_RULES.step(p)
     if type(step) == "number" then return step, "x" .. step end
     local A, N = statNumber("A") or 1, TRAIT_RULES.paired(p)
