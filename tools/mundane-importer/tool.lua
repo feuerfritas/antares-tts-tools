@@ -16073,6 +16073,7 @@ end
 -- roll; Cursed and Flash -- the enemy hit hears of it (see traitHit). A
 -- Blind fighter's melee dice hit on a natural 6 only (ACTIVATION.hitRead).
 function rollAttack(t, player)
+    if ACTIVATION.noTarget(t, player) then return nil end
     if ACTIVATION.tooMany(t, player) then return nil end
     if ACTIVATION.lyingLow(t, player) then return nil end
     if ACTIVATION.cloaked(t, player) then return nil end
@@ -16141,6 +16142,20 @@ function ACTIVATION.lyingLow(t, player)
         done = function(yes, _, who)
             if yes then ACTIVATION.strike(t, who or player) end
         end })
+    return true
+end
+
+-- No fighter selected (ACTIVATION.targets, of any gang) by `player`: the
+-- attack t = { weapon =, profile = } is not rolled and nothing is spent --
+-- a hit roll made first and the target picked afterwards would be a free
+-- re-roll when the attack is pressed again. Chat says why. A Fight Back
+-- (ACTIVATION.back armed) is made on whoever struck, selected or not.
+-- Returns whether it refused.
+function ACTIVATION.noTarget(t, player)
+    if type(t) ~= "table" or #ACTIVATION.targets(player, true) > 0 then return false end
+    if ACTIVATION.back and ACTIVATION.back.state == "armed" then return false end
+    chat(string.format("%s - no target selected: select an enemy before the attack is rolled", fighter.name),
+        rgbOf(COL.valueMod))
     return true
 end
 
