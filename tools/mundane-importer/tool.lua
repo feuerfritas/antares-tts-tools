@@ -17893,8 +17893,10 @@ end
 -- (ACTIVATION.rollSaves). Before any die is rolled, with cover to be had
 -- and an armour save (a fighter without one counts as 7+, which cover can
 -- still bring within reach), the Nerve Check's panel asks for it under
--- "Save: Cover Bonus": the bonus the attack's range gives (+1 / +2; a left
--- click one more, a right click one less, 0 to ACTIVATION.coverMax),
+-- "Save: Cover Bonus": opened at +0, in the open (whether the target is in
+-- cover is the players' call, see Line of Sight & Cover; a left click one
+-- more, a right click one less, 0 to ACTIVATION.coverMax: +1 within Short
+-- Range, +2 within Long),
 -- CFG.coverYes rolls the saves with it, X calls the attack off -- no saves,
 -- no Concussion or Radphage, no damage, no Knockback. The attacker is
 -- highlighted orange meanwhile; another check opened over it doesn't lose
@@ -17939,7 +17941,7 @@ function takeSaves(t)
     local by = cover and t.coverBy and tostring(t.coverBy) or nil   -- a Las-Projector ...: asked at +0 too
     if n >= 1 and cover and (cover > 0 or by) and sv then     -- (the attack may yet be called off)
         local ok, obj = pcall(function() return t.from and getObjectFromGUID(t.from) end)
-        local q = { test = "question", cover = true, keep = true, pair = true, value = cover, coverBy = by,
+        local q = { test = "question", cover = true, keep = true, pair = true, value = 0, coverBy = by,
                     title = "Save: Cover Bonus", obj = ok and obj or nil, ink = rgbOf(COL.valueMod) }
         q.done = function(yes, _, who)
             if not yes then
