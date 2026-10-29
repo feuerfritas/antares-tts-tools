@@ -18336,7 +18336,9 @@ end
 -- `n` Injury dice for wounds taken at 0 wounds (see ACTIVATION.damage),
 -- in one throw (at most MAX_SHOWN): the worst result is applied -- Out of
 -- Action, then Serious Injury (Seriously Injured), then Injury (nothing
--- more). Said, every die and then that result ("Bob - INJURY ROLLS -
+-- more): the attacker's side picks the die (N26, Resolve Hits > 3. Inflict
+-- Damage), so the worst for the fighter is the pick, said so; the
+-- Bio-Booster's pair is the bearer's pick, the better. Said, every die and then that result ("Bob - INJURY ROLLS -
 -- Autogun: Inj, S. Inj = S. Inj", see ACTIVATION.injuryText; the attack's
 -- header said whose) and shown over the stats, the worst result at the
 -- right end. `from` ("Kal's Autogun") is what took the fighter out.
@@ -18366,7 +18368,9 @@ function ACTIVATION.injure(n, from, player, o)
         for _, k in ipairs(order) do worst = worst or (count[k] and k) end
         chat(string.format("%s - INJURY ROLLS - %s: %s%s%s", fighter.name, tostring(o.weapon or from),
             ACTIVATION.injuryText(faces, worst), digital and " (rolled digitally)" or "",
-            o.best and " || (" .. tostring(o.best) .. ": the better kept)" or ""), rgbOf(COL.diceInjured))
+            o.best and " || (" .. tostring(o.best) .. ": the better kept)"
+                or (#faces > 1 and " || (the attacker's pick: the worst for " .. fighter.name .. ")" or "")),
+            rgbOf(COL.diceInjured))
         ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = worst }
         local shown = ACTIVATION.roll
         if fighter.outOfAction then return ended() end
