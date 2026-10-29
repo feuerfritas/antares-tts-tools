@@ -1,0 +1,12 @@
+# Manifest for tts-mod-composer's `build-object` (see ../BUILD.md).
+#
+# This repo keeps each tool's object ModManager-style, beside its Lua
+# (tools/<tool>/<Name>.<guid>.json). build-object can only address a host's own
+# objects/ or a dependency's objects, so this manifest declares the repo itself
+# as a dependency and lets `objects:` find the JSON files.
+mod: antares-tts-tools
+
+dependencies:
+  - name: tools
+    source: local:..            # relative to this file: the repo root
+    objects: tools/*/*.json     # each match is an object; manifest.json is skipped
