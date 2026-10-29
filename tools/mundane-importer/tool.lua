@@ -1655,7 +1655,7 @@ local function runImport(rawText, player)
     local ok, fighters, gang, gangType = pcall(parseExport, rawText)
     if not ok then
         printToAll(IMPORT_PREFIX .. "Parse error: " .. tostring(fighters), { 1, 0.2, 0.2 })
-        return
+        return nil, "Parse error: " .. tostring(fighters)
     end
 
     importCount = importCount + 1
@@ -1710,6 +1710,7 @@ local function runImport(rawText, player)
                    { 0.6, 0.85, 1 })
         for _, n in ipairs(bases) do printToAll(IMPORT_PREFIX .. "    * " .. n, { 0.8, 0.92, 1 }) end
     end
+    return applied, notFound
 end
 
 -- ══════════════════════════════════════════════════════════════
@@ -2080,6 +2081,23 @@ function confirmImport(player, value, id)
         return
     end
     runImport(rosterText, player)
+end
+
+-- Import a roster without the panel, for another object or a test harness:
+--   obj.call("importRoster", {text = "<roster export>"})   (or {"<text>"}, or a bare string)
+-- obj.call hands the argument table over as the single argument, unpacked
+-- by neither side, so both shapes are taken. It also returns only the first
+-- value, so the result is one table. Runs the same path as the Import
+-- button. Returns {ok=true, applied=n, notFound={names with no model}}, or
+-- {ok=false, error="..."} on bad input or a parse error.
+function importRoster(args)
+    local text = type(args) == "table" and (args.text or args[1]) or args
+    if type(text) ~= "string" or text:match("^%s*$") then
+        return { ok = false, error = "importRoster: expected a non-empty roster text" }
+    end
+    local applied, extra = runImport(text, nil)
+    if applied == nil then return { ok = false, error = tostring(extra) } end
+    return { ok = true, applied = applied, notFound = extra }
 end
 
 -- The changes history: shown over the panel, and hidden again.
