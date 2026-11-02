@@ -12397,7 +12397,7 @@ function onTriggerClick(player, value, id)
     elseif fighter.activation == "ready" then
         activate(player)
     elseif fighter.activation == "active" then
-        completeActivation()
+        completeActivation(player)
     end
 end
 
@@ -12493,7 +12493,11 @@ function onRecoveryOut(player, value, id)
     local rec = fighter.recovery
     if not rec then return end
     if tostring(value) == "-2" then closeRecovery() return end
-    setOutOfAction({ value = true, why = rec.foes and ('within 1" of ' .. rec.foes) or nil })
+    -- NQS fork (S2): the Recovery step put it Out of Action -- the event's
+    -- `cause`, which `why` only describes (INT-1 F18)
+    __nqs_mundane_bus.within("cause", { action = "Recovery" }, function()
+        setOutOfAction({ value = true, why = rec.foes and ('within 1" of ' .. rec.foes) or nil })
+    end)
 end
 
 -- The cursor onto a roll's dice over the stats, and off them again (see
@@ -14684,7 +14688,9 @@ end
 -- ACTIVATION.visionsCheck). A fighter with another Ready marker left (a
 -- Spyrer, see setReady) is Ready again afterwards, S half lit.
 -- Returns "out", "recovery" or "done" -- or nil when it wasn't active.
-function completeActivation()
+-- `player`, who completed it (NQS fork, S2: the end event's `player` and
+-- `by`, INT-1 F18), may be nil.
+function completeActivation(player)
     if fighter.activation ~= "active" then return nil end
     local recover = fighter.startedSI and fighter.status == "seriously_injured"
     local again = (tonumber(fighter.readyMarks) or 0) > 0
@@ -14706,14 +14712,16 @@ function completeActivation()
     onActionsChanged(0)
     chat(again and string.format("%s has completed their activation -- %d more this round", fighter.name, fighter.readyMarks)
          or string.format("%s has completed their activation", fighter.name))
-    __nqs_mundane_bus.send({ kind = "activation", state = "end" })   -- NQS fork (S2, S1-h; optional per S1)
+    __nqs_mundane_bus.send({ kind = "activation", state = "end", by = player })   -- NQS fork (S2, S1-h; optional per S1)
     ACTIVATION.backsEnd()                       -- a fighter that didn't Fight Back goes Out of Action
     ACTIVATION.visionsCheck()
     ACTIVATION.timedEnd()                       -- Concussion wears off, a Webbed check
     if not recover then return "done" end
     local near = ACTIVATION.surroundings()
     if #near.foes > 0 then
-        setOutOfAction({ value = true, why = 'within 1" of ' .. ACTIVATION.nameList(near.foes) })
+        __nqs_mundane_bus.within("cause", { action = "Recovery" }, function()   -- NQS fork (S2, F18)
+            setOutOfAction({ value = true, why = 'within 1" of ' .. ACTIVATION.nameList(near.foes) })
+        end)
         return "out"
     end
     recoveryTest(near)
@@ -14850,7 +14858,9 @@ function ACTIVATION.tellController(back)
     local gang = ui.gangOf(self)
     if not gang or gang == "" then gang = trimText(fighter.gang or "") end
     for _, obj in ipairs(ok and type(objs) == "table" and objs or {}) do
-        ACTIVATION.ask(obj, "onFighterOut", { gang = gang, name = fighter.name, back = back or nil })
+        -- NQS fork (S2, F18): `player`, for the Controller's bottle_due event
+        ACTIVATION.ask(obj, "onFighterOut", { gang = gang, name = fighter.name, back = back or nil,
+            player = __nqs_mundane_bus.clickerColor() })
     end
 end
 
@@ -18769,14 +18779,14 @@ function ACTIVATION.rollSaves(t, cover, player)
                 weapon = tostring(t.weapon or "Weapon"),
                 target = needOf(1), needs = needs, aps = aps,
                 outcome = { passed = through == 0, saved = saved, through = through },
-                -- `through` is S2's: what took the armour save away. The count
-                -- of wounds through, which MI4a published as `through`, is
-                -- `wounds_through` (and outcome.through)
-                saved = saved, wounds_through = through, cover = cover, ap = ap,
+                -- `through` stays the count of wounds through, as MI4a
+                -- published it; what took the armour save away is
+                -- `removed_by` (operator, 2026-11-02)
+                saved = saved, through = through, cover = cover, ap = ap,
                 inv = v0,
                 burnt = burnt and burnt.name or nil,
                 sources = #sources > 0 and sources or nil,
-                through = thru, gas = t.gas and true or nil, web = t.web and true or nil,
+                removed_by = thru, gas = t.gas and true or nil, web = t.web and true or nil,
                 attack_id = id, group = id,
                 attacker = t.by and tostring(t.by) or nil,
                 by = player,
@@ -21548,7 +21558,9 @@ function wyrdTarget(t)
         return false
     end
     if t.out then
-        setOutOfAction({ value = true, why = string.format("%s by %s", power, by) })
+        __nqs_mundane_bus.within("cause", { action = power }, function()   -- NQS fork (S2, F18)
+            setOutOfAction({ value = true, why = string.format("%s by %s", power, by) })
+        end)
         return true
     end
     if t.needReady and fighter.activation ~= "ready" then
@@ -21963,7 +21975,7 @@ function ACTIVATION.fallEnd(catfall, player)
     local function down()
         if fighter.outOfAction then return end
         if fighter.status == "active" then setStatus("suppressed") end
-        if fighter.activation == "active" then completeActivation() end
+        if fighter.activation == "active" then completeActivation(player) end
     end
     if not catfall or fighter.status ~= "active" then return down() end
     ACTIVATION.agility({ why = "Catfall", after = ACTIVATION.roll, done = function(passed)
@@ -22435,16 +22447,26 @@ function __nqs_mundane_bus.who(p)
     if ok and type(n) == "string" and n ~= "" then return n end
     return type(p) == "string" and p or nil
 end
+-- The seat colour of `clicker`, or else of the card's last clicker (see
+-- send); nil when the card has had none since it loaded.
+function __nqs_mundane_bus.clickerColor(clicker)
+    local c = __nqs_mundane_bus.card
+    return colorOf(clicker or c.by or c.last)
+end
 function __nqs_mundane_bus.send(ev)
     local c = __nqs_mundane_bus.card
     if ev.fighter == nil and fighter then ev.fighter = fighter.name end
     local clicker = c.by or ev.by
+    if clicker ~= nil then c.last = clicker end
     ev.by = __nqs_mundane_bus.who(clicker)
     -- `player` stays what the card published before S2 -- the clicking seat
     -- colour (a stand-in's `color`, if it names one), left out when there
     -- is none -- since consumers read it today. Once game-recorder's S1-l
-    -- fills `player` with the gang owner's name, this line goes.
-    if ev.player == nil then ev.player = colorOf(clicker) end
+    -- fills `player` with the gang owner's name, this line goes. An event
+    -- no click is passed to (a setter's state_change, a Recovery's Out of
+    -- Action) takes the card's last clicker: the activation or action it
+    -- follows from (INT-1 F18). `by` stays only what was actually passed.
+    if ev.player == nil then ev.player = __nqs_mundane_bus.clickerColor(clicker) end
     if ev.kind == "state_change" and c.STATE[ev.field or ""] and ev.attack_id == nil and ev.cause == nil
        and not ev.replay then
         if c.attack and os.time() - (c.attackAt or 0) <= (tonumber(CFG.seqStale) or 120) then

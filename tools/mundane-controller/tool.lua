@@ -3702,7 +3702,8 @@ function onFighterOut(t)
     if not due then return end
     -- NQS fork: the gang now owes a Bottle Check (S2 contract, "The Controller")
     __nqs_mundane_bus.emit({ kind = "state_change", field = "bottle_due", gang = gang, from = false, to = true,
-        cause = { action = "fighter_out", fighter = tostring(t.name or "") } })
+        cause = { action = "fighter_out", fighter = tostring(t.name or "") },
+        player = t.player and tostring(t.player) or nil })   -- the card's clicker (F18)
     printToAll(string.format("[%s] %s is Out of Action: %s must take a Bottle Check this round.%s", gang,
         tostring(t.name or "A fighter"), gang,
         shown and "" or " Put one of its models on the table in front of a side panel of the Mundane Controller."), { 1, 0.55, 0.2 })
