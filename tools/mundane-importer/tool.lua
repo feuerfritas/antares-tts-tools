@@ -110,25 +110,48 @@ end
 -- them until they answer. `objs` the models, `before` each one's
 -- MUNDA_STAMP before its script was written (a card sets it anew on every
 -- load; nil for a model that had none): once every model still on the
--- table has a new one -- or after 20 s, `timeout` then true --
+-- table has a new one -- or after 20 s, a failsafe, `timeout` then true --
 -- done(guids, timeout). Functions on the bus table, not locals: this
 -- chunk is close to Lua's 200-local ceiling.
 function __nqs_mundane_bus.stampOf(obj)
     local ok, v = pcall(function() return obj.getVar("MUNDA_STAMP") end)
     return ok and v or nil
 end
+-- How long a model may read no MUNDA_STAMP at all before it stops holding
+-- the wait (see whenLoaded).
+__nqs_mundane_bus.STAMPLESS = 3
 function __nqs_mundane_bus.whenLoaded(objs, before, done)
-    local guids = {}
+    local guids, bare = {}, {}
     for i, o in ipairs(objs) do
         local ok, g = pcall(function() return o.getGUID() end)
         guids[i] = ok and g or nil
     end
+    local function clock()
+        local ok, t = pcall(function() return Time.time end)
+        return ok and tonumber(t) or os.time()
+    end
+    -- Looked up by GUID on every check: installCard's obj.reload() replaces
+    -- the object, and the reference taken before it reads as destroyed from
+    -- then on, which would count every model as gone at reload time. Only a
+    -- GUID that finds no object is gone. A model with no stamp is between
+    -- its reload and its script's first line, or has a script that never
+    -- sets one (it failed to load, or is no card of ours): it waits for a
+    -- stamp, but once it has read none for STAMPLESS seconds it counts as
+    -- loaded -- as far as it is going to -- rather than hold every other
+    -- model's models_refreshed until the 20 s failsafe.
     local function loaded()
-        for i, o in ipairs(objs) do
-            local ok, gone = pcall(function() return o == nil or o.isDestroyed() end)
-            if ok and not gone then
+        for i = 1, #objs do
+            local g = guids[i]                  -- no GUID read: nothing to wait for
+            local ok, o = pcall(function() return g and getObjectFromGUID(g) end)
+            if ok and o then
                 local now = __nqs_mundane_bus.stampOf(o)
-                if now == nil or now == before[i] then return false end
+                if now == nil then
+                    bare[i] = bare[i] or clock()
+                    if clock() - bare[i] < __nqs_mundane_bus.STAMPLESS then return false end
+                else
+                    bare[i] = nil
+                    if now == before[i] then return false end
+                end
             end
         end
         return true
