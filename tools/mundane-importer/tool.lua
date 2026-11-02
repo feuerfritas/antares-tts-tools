@@ -14381,7 +14381,7 @@ function setStatus(key)
     -- when the status actually changes; a no-op setStatus (same key)
     -- publishes nothing, keeping the bus quiet during UI re-renders.
     if def.key ~= before then
-        __nqs_mundane_bus.emit({
+        __nqs_mundane_bus.send({
             kind = "state_change", action = "status",
             fighter = fighter and fighter.name or nil,
             field = "status",
@@ -14735,7 +14735,7 @@ function setOutOfAction(on)
     -- separate "took OOA" event. `out_cold` is set when it is a non-lethal
     -- knockout (gang-roster has no corresponding field; the recorder
     -- consumes it as an optional enrichment).
-    __nqs_mundane_bus.emit({
+    __nqs_mundane_bus.send({
         kind = "state_change", action = "out_of_action",
         fighter = fighter and fighter.name or nil,
         field = "out_of_action",
@@ -15216,7 +15216,7 @@ function setCondition(key, n)
     -- on actual change; a no-op setCondition (n == before) publishes
     -- nothing.
     if n ~= before then
-        __nqs_mundane_bus.emit({
+        __nqs_mundane_bus.send({
             kind = "state_change", action = "condition",
             fighter = fighter and fighter.name or nil,
             field = "condition",
@@ -15957,7 +15957,7 @@ function ACTIVATION.rollTest(key, player, o)
             else
                 __outcome = { total = test.total }
             end
-            __nqs_mundane_bus.emit({
+            __nqs_mundane_bus.send({
                 kind = "roll", action = __action,
                 fighter = fighter and fighter.name or nil,
                 dice = __nqs_mundane_bus.diceArray(faces, "D6"),
@@ -15966,7 +15966,7 @@ function ACTIVATION.rollTest(key, player, o)
                 target = test.target,
                 outcome = __outcome,
                 why = o.why or nil,
-                player = tostring(color or player),
+                by = color or player,
             })
         end
         if o.done then o.done(test, ACTIVATION.roll) end
@@ -16050,12 +16050,12 @@ function rollDice(n, player)
         -- sum. The recorder treats this as a non-chain roll with
         -- `action = "d6 roll"`, which the webplayer can still render as "the
         -- fighter picked up N dice and the player read them".
-        __nqs_mundane_bus.emit({
+        __nqs_mundane_bus.send({
             kind = "roll", action = "d6 roll",
             fighter = fighter and fighter.name or nil,
             dice = __nqs_mundane_bus.diceArray(faces, "D6"),
             outcome = { total = total },
-            player = tostring(color or player),
+            by = color or player,
         })
     end, "d6", title)
     return true
@@ -16093,12 +16093,12 @@ function rollFirepower(n, player)
         -- middle of `faces`), so this is for the loose roll with no attack
         -- context. `action = "firepower"` + FIREPOWER-typed dice; outcome
         -- carries hits and the ammo-check flag.
-        __nqs_mundane_bus.emit({
+        __nqs_mundane_bus.send({
             kind = "roll", action = "firepower",
             fighter = fighter and fighter.name or nil,
             dice = __nqs_mundane_bus.diceArray(faces, "FIREPOWER"),
             outcome = { hits = hits, ammo_checks = checks, ammo_fired = ammo and true or false },
-            player = tostring(color or player),
+            by = color or player,
         })
     end, "firepower", title)
     return true
@@ -16142,7 +16142,7 @@ function rollInjuries(n, player)
         -- analysis. Standalone injury rolls are rare enough that an untied
         -- event is honest -- there is no attack chain to group them with.
         do
-            __nqs_mundane_bus.emit({
+            __nqs_mundane_bus.send({
                 kind = "roll", action = "injury roll",
                 fighter = fighter and fighter.name or nil,
                 dice = __nqs_mundane_bus.diceArray(faces, "INJURY"),
@@ -16154,7 +16154,7 @@ function rollInjuries(n, player)
                     best = best,
                     out_of_action = (count.out == #faces) and true or false,
                 },
-                player = tostring(color or player),
+                by = color or player,
             })
         end
     end, "injury", title)
@@ -16232,6 +16232,10 @@ end
 function ACTIVATION.seqJoin(t)
     if type(t) == "table" and t.seq and t.from then
         ACTIVATION.targeted[tostring(t.from) .. ":" .. tostring(t.seq)] = os.time()
+        -- NQS fork (S2): this card's hp / status / condition changes until
+        -- its part is over (ACTIVATION.seqEnd) are the attack's
+        __nqs_mundane_bus.card.attack = __nqs_mundane_bus.attackId(t.seq, t.from)
+        __nqs_mundane_bus.card.attackAt = os.time()
     end
 end
 -- `fn` runs once every part of sequence `token` is over, before it closes;
@@ -16307,6 +16311,10 @@ function ACTIVATION.seqEnd(t)
     end
     if type(t) ~= "table" or not (t.seq and t.from) or t.seqEnded then return end
     t.seqEnded = true
+    -- NQS fork (S2): what follows here is no longer the attack's
+    if __nqs_mundane_bus.card.attack == __nqs_mundane_bus.attackId(t.seq, t.from) then
+        __nqs_mundane_bus.card.attack = nil
+    end
     local ok, obj = pcall(function() return getObjectFromGUID(t.from) end)
     if ok and obj then ACTIVATION.ask(obj, "attackOver", { token = t.seq }) end
 end
@@ -16773,6 +16781,11 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
     local lead = head .. (mod and " w. " .. mod or "") .. ": "
     local VERB = "HIT ROLLS"
     local color = colorOf(player)
+    -- NQS fork (S2): what __nqs_mundane_bus.hitRoll needs, kept on the
+    -- attack so a re-roll (rerollHits, Twin-Linked, Cacophony) can publish
+    -- the faces it replaces
+    attack.bus = { kinds = kinds, ammo = ammoNeed and #kinds or nil, ammoNeed = ammoNeed, weapon = name,
+                   need = h and h.need or nil }
     local function landed(faces, digital)
         local hls, fx = {}, {}                       -- fx: the tags on each die (see ACTIVATION.EFFECTS)
         local kb = false                             -- Knockback: a hit die reached its N
@@ -16982,38 +16995,23 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             struck, dice = {}, {}
         end
         onAttackRolled(player, res)
-        -- MI4a hit-roll publish. Fires once per attack from the only site
-        -- where the raw hit-roll faces are known: `faces` already carries any
-        -- re-rolls, Twin-Linked re-rolls and Cacophony re-rolls (see
-        -- `rerollHits` -> `thrown` -> `twin` -> `landed`), so what the recorder
-        -- sees is the attack's final hit-roll outcome rather than any
-        -- intermediate state. `attack.seq` is the per-attack chain id MI uses
-        -- across hit/wound/save, matching gang-roster's `attack_id`
-        -- convention (see game-recorder SPEC Channel 2 and gang-roster
-        -- src/roster.ttslua rollDice's `attackId` stamp). All variants hit
-        -- this: single-target shots, melee attacks, Template/Blast (whose
-        -- per-target spread then fans out through ACTIVATION.eachHit, which
-        -- carries no dice faces and is a target-dispatch site rather than a
-        -- roll-outcome site -- publishing from eachHit instead would miss
-        -- every single-target shot and every melee hit).
+        -- NQS fork (S2, the attack chain): the hit roll, each die labelled
+        -- (hit / firepower), its triggers in `outcome`, the Ammo die its own
+        -- roll in the attack's group (see __nqs_mundane_bus.hitRoll). From
+        -- here, where the faces are final: any re-roll before (rerollHits,
+        -- Twin-Linked, Cacophony) has published the faces it replaced.
         do
-            local __mi_dice = {}
-            for __i, __f in ipairs(faces) do
-                local __k = kinds[__i] or "d6"
-                __mi_dice[__i] = { type = __k == "firepower" and "FIREPOWER" or "D6",
-                                   value = __f, face = tostring(__f) }
+            local crit = false
+            for i, f in ipairs(faces) do
+                if f == 6 and kinds[i] == "d6" and i ~= (ammoNeed and #kinds) then crit = true end
             end
-            __nqs_mundane_bus.emit({
-                kind = "roll", action = "hit roll",
-                fighter = fighter and fighter.name or nil,
-                dice = __mi_dice,
-                direction = "gte",
-                weapon = name,
-                target = h and h.need or nil,
-                outcome = { passed = (res.hit or (res.hits or 0) > 0) and true or false },
-                attack_id = tostring(attack.seq),
-                player = tostring(color or player),
-            })
+            if template then crit = false end         -- a Template's hits come of no hit die (its Unstable die neither)
+            __nqs_mundane_bus.hitRoll(attack, faces, {
+                passed = (res.hit or (res.hits or 0) > 0) and true or false, hits = res.hits or 0,
+                shock = res.shock, knockback = kb or nil, crit = crit or nil,
+                unstable = res.unstable and true or nil, precision = res.precise,
+                ammo = res.ammo, spared = res.spared or nil, state = res.state,
+            }, res.target, res.targets, player)
         end
         -- a ranged hit on a selected enemy: it is Suppressed (Nerves Of Steel
         -- may save it), unless the weapon is Smoke; Cursed and Flash have
@@ -17085,6 +17083,9 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             ACTIVATION.openCheck({ test = "question", title = CFG.twinAsk, keep = true, yes = true,
                 done = function(yes, _, who)
                     if not yes then return landed(faces, digital) end
+                    -- NQS fork (S2): the faces Twin-Linked replaces, published as they were
+                    __nqs_mundane_bus.hitRoll(attack, faces, nil, attack.target, attack.targets, who or player,
+                        "Twin-Linked")
                     ACTIVATION.rolling(title, mod, modInk)
                     local fk = {}
                     for k = 1, rf do fk[k] = "firepower" end
@@ -17107,6 +17108,7 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             lead, first, cac.name, cac.power))
         local held = { title = title, mod = mod, modInk = modInk, kinds = kinds, faces = faces, hls = { COL.wyrdInk } }
         ACTIVATION.showDice(held)
+        __nqs_mundane_bus.hitRoll(attack, faces, nil, attack.target, attack.targets, player, cac.power)   -- NQS fork (S2)
         ACTIVATION.later(held, function()
             ACTIVATION.rolling(title, mod, modInk)
             throwDice(1, color, function(again, digital2)
@@ -17521,6 +17523,9 @@ function ACTIVATION.rerollHits(attack, o, faces, digital, go)
         #idx == 1 and "re-rolled" or #idx .. " re-rolled"), COL.valueMod, digital, { TRAIT_RULES.REROLL[how] })
     local held = { title = o.title, mod = o.mod, modInk = o.modInk, kinds = o.kinds, faces = faces, hls = hls }
     ACTIVATION.showDice(held)
+    -- NQS fork (S2): the faces the re-roll replaces, published as they were
+    __nqs_mundane_bus.hitRoll(attack, faces, nil, attack.target, attack.targets, o.color,
+        TRAIT_RULES.REROLL[how] or tostring(how))
     ACTIVATION.later(held, function()
         ACTIVATION.rolling(o.title, o.mod, o.modInk)
         throwDice(#idx, o.color, function(again, digital2)
@@ -17874,6 +17879,7 @@ function ACTIVATION.woundRoll(seq, player)
     local function landed(got, digital)
         local faces, hls, fx, half, n, gen, per, j, sh = {}, {}, {}, {}, 0, {}, {}, 0, 0
         local stopped                            -- a Blaze an immune enemy didn't suffer
+        local trig = {}                          -- NQS fork (S2): each die's triggers, for the bus
         local rd, sd, cc, bd = 0, 0, 0, 0        -- Rending, Shred, Concussive, Breaching at work
         for k, v in pairs(seq.per or {}) do per[k] = v end
         for i, d in ipairs(dice) do
@@ -17904,6 +17910,10 @@ function ACTIVATION.woundRoll(seq, player)
             if d.auto then sh = sh + 1 end
             if more then gen[#gen + 1] = d.plan end
             did.blaze = more or nil
+            if next(did) or (ok and d.precise) then
+                trig[#trig + 1] = { die = i, rending = did.rend, breaching = did.breach, shred = did.shred,
+                                    concussive = did.conc, blaze = did.blaze, precision = ok and d.precise or nil }
+            end
             fx[i] = ACTIVATION.effects(did)
             -- what it came of: a Shock hit's automatic 6, a Precision Shot's hit, a Blaze hit
             half[i] = d.auto and "shock" or d.precise and "precise" or d.blazed and "blaze" or nil
@@ -17993,37 +18003,34 @@ function ACTIVATION.woundRoll(seq, player)
         ACTIVATION.showDice(roll)
         onWoundsRolled(player, { plan = plan, plans = list, faces = faces, need = ACTIVATION.planNeed(plan), wounds = n,
                                  total = total, round = seq.blazed and 2 or 1, blaze = #gen, digital = digital })
-        -- MI4a wound-roll publish. One event per `woundRoll` landing;
-        -- Blaze (N+) re-enters this same function via `blazeRound`, which
-        -- means each Blaze round publishes its own `wound roll` event too --
-        -- a shape the recorder can group by `attack_id`. `plan.target` is the
-        -- primary target's name (first in `list`); a Template with several
-        -- targets lands them all under one plan and the per-target split
-        -- lives in `plans[d.plan].target`, carried in `targets`. S/AP/L
-        -- fields match gang-roster's `strength`/`ap`/`lethality` so the
-        -- recorder's wound-roll shape is portable across both publishers.
+        -- NQS fork (S2, the attack chain): the Wound roll -- each Blaze round
+        -- its own -- with what each die's traits did in `outcome`. A Blast's
+        -- is rolled on the card it caught (seq.remote, see blastWound) but is
+        -- the attacker's roll: its fighter and guid are the attacker's, and
+        -- its attack_id the attacker's attack (never the string "nil").
         do
-            local __mi_targets
+            local targets, prec = nil, 0
             if #list > 1 then
-                __mi_targets = {}
-                for __i, __q in ipairs(list) do
-                    __mi_targets[__i] = tostring(__q.target or "?")
-                end
+                targets = {}
+                for k, q in ipairs(list) do targets[k] = tostring(q.target or "?") end
             end
-            __nqs_mundane_bus.emit({
-                kind = "roll", action = "wound roll, " .. tostring(plan.weapon or seq.weapon or "Weapon"),
-                fighter = fighter and fighter.name or nil,
+            for _, x in ipairs(trig) do if x.precision then prec = prec + 1 end end
+            local rem = seq.remote
+            local id = rem and __nqs_mundane_bus.attackId(rem.seq, rem.from) or __nqs_mundane_bus.attackId(seq.attackSeq)
+            local wn = tostring(plan.weapon or seq.weapon or "Weapon")
+            __nqs_mundane_bus.send({
+                kind = "roll", action = "wound roll, " .. wn, label = seq.blazed and "Wound (Blaze)" or "Wound",
+                fighter = rem and plan.by and tostring(plan.by) or nil, guid = rem and rem.from or nil,
                 dice = __nqs_mundane_bus.diceArray(faces, "D6"),
-                direction = "gte",
-                weapon = tostring(plan.weapon or seq.weapon or "Weapon"),
-                target = ACTIVATION.planNeed(plan),
-                outcome = { passed = n > 0 },
+                direction = "gte", weapon = wn, target = ACTIVATION.planNeed(plan),
+                outcome = { passed = n > 0, wounds = n, rending = rd > 0 and rd or nil, breaching = bd > 0 and bd or nil,
+                            shred = sd > 0 and sd or nil, concussive = cc > 0 and cc or nil,
+                            blaze = #gen > 0 and #gen or nil, precision = prec > 0 and prec or nil,
+                            shock = sh > 0 and sh or nil, triggers = #trig > 0 and trig or nil },
                 strength = plan.s, ap = plan.ap, lethality = plan.l,
-                target_fighter = tostring(plan.target or "?"),
-                targets = __mi_targets,
+                target_fighter = tostring(plan.target or "?"), targets = targets,
                 blaze_round = seq.blazed and true or nil,
-                attack_id = tostring(seq.attackSeq),
-                player = tostring(colorOf and colorOf(player) or player),
+                attack_id = id, group = id, by = player,
             })
         end
         if #gen > 0 then
@@ -18606,28 +18613,39 @@ function ACTIVATION.rollSaves(t, cover, player)
                                 inv = v0, cover = cover, ap = ap, burnt = burnt and burnt.name or nil,
                                 precise = some or nil,
                                 by = t.by, weapon = t.weapon, digital = digital })
-        -- MI4a save-roll publish. One event per `rollSaves` landing, before
-        -- `ACTIVATION.damage` so the recorder sees the save result ahead of
-        -- the damage that follows it in-chain. Target fighter is this
-        -- card's own `fighter` (saves land on the defender -- unlike hit/wound
-        -- which publish from the attacker's card). The attack_id matches the
-        -- attacker's hit/wound chain via `t.attackSeq` the attacker's
-        -- `woundRoll` plans stamped on `t` when it dispatched to this card.
+        -- NQS fork (S2, the attack chain): the save roll on the wounded
+        -- fighter's card, before the damage it lets through. `sources`
+        -- names what the save was taken with -- what changed Sv against
+        -- this attack (Mesh Armour, Parry, a Shield: STAT.why in saveCtx),
+        -- Cover, the item giving the invulnerable save, an item ignoring
+        -- AP -- and `through` what took the armour save away (Precision
+        -- Shot, Breaching, Graviton Pulse: ACTIVATION.noArmour).
         do
-            __nqs_mundane_bus.emit({
-                kind = "roll", action = "save",
-                fighter = fighter and fighter.name or nil,
+            local sources, thru = {}, nil
+            if not all and sv and not none then STAT.why("Sv", ACTIVATION.saveCtx(t), sources) end
+            if cover > 0 and not all then sources[#sources + 1] = "Cover" end
+            if by and by.name then sources[#sources + 1] = tostring(by.name) end
+            if proof and not all then sources[#sources + 1] = tostring(proof) end
+            for k = 1, #faces do thru = thru or precise(k) end
+            local id = __nqs_mundane_bus.attackId(t.seq, t.from)
+            __nqs_mundane_bus.send({
+                kind = "roll", action = "save", label = "Save",
                 dice = __nqs_mundane_bus.diceArray(faces, "D6"),
                 direction = "gte",
                 weapon = tostring(t.weapon or "Weapon"),
-                target = needOf(1),
-                outcome = { passed = through == 0 },
-                saved = saved, through = through, cover = cover, ap = ap,
+                target = needOf(1), needs = needs, aps = aps,
+                outcome = { passed = through == 0, saved = saved, through = through },
+                -- `through` is S2's: what took the armour save away. The count
+                -- of wounds through, which MI4a published as `through`, is
+                -- `wounds_through` (and outcome.through)
+                saved = saved, wounds_through = through, cover = cover, ap = ap,
                 inv = v0,
                 burnt = burnt and burnt.name or nil,
-                attack_id = tostring(t.attackSeq or ""),
-                attacker = tostring(t.by or ""),
-                player = tostring(colorOf and colorOf(player) or player),
+                sources = #sources > 0 and sources or nil,
+                through = thru, gas = t.gas and true or nil, web = t.web and true or nil,
+                attack_id = id, group = id,
+                attacker = t.by and tostring(t.by) or nil,
+                by = player,
             })
         end
         ACTIVATION.damage(t, failed, shown, player)
@@ -18671,6 +18689,7 @@ function ACTIVATION.damage(t, failed, roll, player)
     local bio = ACTIVATION.bioBooster()
     local lost, inj, was, boosted, pair = 0, 0, fighter.wounds.current, nil, false
     local toxic = 0                                  -- wounds suffered with wounds still left (Toxic Blood)
+    local pools = {}                                 -- NQS fork (S2): each wound's Injury dice, in order
     for _, w in ipairs(failed) do
         local d = math.max(0, math.floor(tonumber(w.dmg) or 1))
         local l = math.max(0, math.floor(tonumber(w.l) or 0))
@@ -18687,9 +18706,11 @@ function ACTIVATION.damage(t, failed, roll, player)
                     pair, l = l > 0 and less == 0, less
                 end
                 inj = inj + l
+                if l > 0 then pools[#pools + 1] = l end
             end
         else
             inj = inj + l
+            if l > 0 then pools[#pools + 1] = l end
         end
     end
     if boosted then
@@ -18715,14 +18736,17 @@ function ACTIVATION.damage(t, failed, roll, player)
         ACTIVATION.later(r, function()
             ACTIVATION.injure(inj, from, player, { weapon = t.weapon, done = function(r2) ACTIVATION.knockSelf(t, r2) end,
                                                    ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil,
-                                                   attack_id = t.attackSeq })
+                                                   attack_id = __nqs_mundane_bus.attackId(t.seq, t.from),
+                                                   pools = pools, first = pair and 2 or 1,
+                                                   of = #pools + (pair and 1 or 0) })
         end)
     end
     if pair then
         ACTIVATION.later(roll, function()
             ACTIVATION.injure(2, from, player, { weapon = t.weapon, best = boosted.name, done = rest,
                                                  ended = function() ACTIVATION.seqEnd(t) end, back = t.fight and t or nil,
-                                                 attack_id = t.attackSeq })
+                                                 attack_id = __nqs_mundane_bus.attackId(t.seq, t.from),
+                                                 pools = { 2 }, first = 1, of = #pools + 1 })
         end)
     else
         rest(roll)
@@ -18748,9 +18772,11 @@ function ACTIVATION.dodge(t, failed, roll, player)
         ACTIVATION.rolling(title)
         throwDice(#failed, colorOf(player), function(faces, digital)
             local cur, hls, read, through, dodged = fighter.wounds.current, {}, {}, {}, 0
+            local id = __nqs_mundane_bus.attackId(t.seq, t.from)   -- NQS fork (S2)
             for i, f in ipairs(faces) do
                 local w = failed[i]
                 read[i] = tostring(f)
+                local wasted = cur <= 0
                 if cur <= 0 then
                     hls[i], through[#through + 1] = COL.diceWasted, w
                 elseif f >= need then
@@ -18759,6 +18785,16 @@ function ACTIVATION.dodge(t, failed, roll, player)
                     hls[i], through[#through + 1] = COL.valueMod, w
                     cur = cur - math.max(0, math.floor(tonumber(w.dmg) or 1))
                 end
+                -- NQS fork (S2, the attack chain): Dodge, one roll per wound, in
+                -- the attack's group, where the card makes it (after the save)
+                __nqs_mundane_bus.send({
+                    kind = "roll", action = "dodge", label = "Dodge",
+                    wound = i,
+                    dice = __nqs_mundane_bus.diceArray({ f }, "D6"), direction = "gte", target = need,
+                    weapon = t.weapon and tostring(t.weapon) or nil,
+                    outcome = { passed = not wasted and f >= need, wasted = wasted or nil },
+                    attack_id = id, group = id, attacker = t.by and tostring(t.by) or nil, by = player,
+                })
             end
             local UP, MOD = COL.valueUp, COL.valueMod
             ACTIVATION.sayAttack("DODGE ROLLS", tostring(t.weapon or "Weapon"),
@@ -18824,6 +18860,38 @@ function ACTIVATION.injure(n, from, player, o)
             rgbOf(COL.diceInjured))
         ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = worst }
         local shown = ACTIVATION.roll
+        -- NQS fork (S2, the attack chain): one Injury roll per wound pool
+        -- (o.pools: each wound's dice, in the order thrown; none given, the
+        -- throw is one pool), labelled "Injury, wound 2 of 3", in the
+        -- attack's group, the die used in each marked `used = true`. The
+        -- card applies the worst result of the whole throw -- the attacker's
+        -- pick (NQS-L1) -- so `chooser` is "attacker"; a Bio-Booster's pair
+        -- keeps the better, the bearer's pick, "victim"; Injury dice no
+        -- attack caused (a fall) "auto". The card picks every time: nobody
+        -- is asked.
+        do
+            local id = o.attack_id
+            local pools = __nqs_mundane_bus.injuryPools(faces, o.pools,
+                function(f) return ACTIVATION.INJURY_DICE[f] end, o.best ~= nil)
+            local first, of = tonumber(o.first) or 1, tonumber(o.of) or #pools
+            if of < first + #pools - 1 then of = first + #pools - 1 end
+            for k, p in ipairs(pools) do
+                local dice = __nqs_mundane_bus.diceArray(p.faces, "INJURY")
+                dice[p.used].used = true
+                __nqs_mundane_bus.send({
+                    kind = "roll",
+                    action = o.weapon and ("injury roll, " .. tostring(o.weapon)) or "injury roll",
+                    label = of > 1 and string.format("Injury, wound %d of %d", first + k - 1, of) or "Injury",
+                    dice = dice,
+                    weapon = o.weapon and tostring(o.weapon) or nil,
+                    chooser = o.best and "victim" or id and "attacker" or "auto",   -- "auto": no attack (a fall)
+                    outcome = { result = p.result, applied = worst, out_of_action = (worst == "out") and true or false },
+                    attack_id = id, group = id,
+                    attacker = from and tostring(from) or nil,
+                    by = color or player,
+                })
+            end
+        end
         if fighter.outOfAction then return ended() end
         if worst == "out" and o.back then
             ACTIVATION.fightBackAsk(o.back, "Injury dice from " .. from)
@@ -18832,34 +18900,6 @@ function ACTIVATION.injure(n, from, player, o)
             setOutOfAction{ value = true, why = "Injury dice from " .. from }
         elseif worst == "serious" and fighter.status ~= "seriously_injured" then
             setStatus("seriously_injured")
-        end
-        -- MI4b injury-roll publish, in-chain variant (ACTIVATION.injure is
-        -- reached from ACTIVATION.damage after a wound goes through). Carries
-        -- the weapon that caused the damage (o.weapon) and -- when the caller
-        -- threaded it in `o.attack_id` -- the chain id that ties this
-        -- injury to the hit / wound / save already in the recorder's attack
-        -- group. The standalone rollInjuries site below publishes an
-        -- attack_id-less copy for Special-tab / obj.call entries. Shape
-        -- matches gang-roster's `action = "injury roll, <weapon>"` with
-        -- `dice.type = "INJURY"` (gang-roster SPEC's "Rolls" dice vocab).
-        do
-            __nqs_mundane_bus.emit({
-                kind = "roll",
-                action = o.weapon and ("injury roll, " .. tostring(o.weapon)) or "injury roll",
-                fighter = fighter and fighter.name or nil,
-                dice = __nqs_mundane_bus.diceArray(faces, "INJURY"),
-                weapon = o.weapon and tostring(o.weapon) or nil,
-                outcome = {
-                    out = count.out or 0,
-                    serious = count.serious or 0,
-                    injured = count.injured or 0,
-                    worst = worst,
-                    out_of_action = (worst == "out") and true or false,
-                },
-                attack_id = o.attack_id and tostring(o.attack_id) or nil,
-                attacker = from and tostring(from) or nil,
-                player = tostring(color or player),
-            })
         end
         if o.done and not fighter.outOfAction then o.done(shown) else ended() end
     end, "injury", title)
@@ -19004,13 +19044,13 @@ function ACTIVATION.reloadNow(list, player, o)
             -- with no numeric from/to -- just "the weapon is reloaded now").
             do
                 local __wname = TRAIT_RULES.name(e.w)
-                __nqs_mundane_bus.emit({
+                __nqs_mundane_bus.send({
                     kind = "event", event = "reloaded",
                     fighter = fighter and fighter.name or nil,
                     weapon = __wname and tostring(__wname) or nil,
                     profile = e.pi,
                     scarce = false,
-                    player = tostring(colorOf and colorOf(player) or player),
+                    by = player,
                 })
             end
         end
@@ -19046,7 +19086,7 @@ function ACTIVATION.reloadNow(list, player, o)
                     -- on failure, the weapon stays OUT and nothing follows.
                     do
                         local __wname = TRAIT_RULES.name(e.w)
-                        __nqs_mundane_bus.emit({
+                        __nqs_mundane_bus.send({
                             kind = "roll",
                             action = __wname and ("ammo test, " .. tostring(__wname)) or "ammo test",
                             fighter = fighter and fighter.name or nil,
@@ -19056,7 +19096,7 @@ function ACTIVATION.reloadNow(list, player, o)
                             profile = e.pi,
                             target = s.need,
                             outcome = { passed = ok and true or false, reason = "scarce" },
-                            player = tostring(colorOf and colorOf(player) or player),
+                            by = player,
                         })
                     end
                 end
@@ -19623,7 +19663,7 @@ function rollNerve(player)
         -- extra fields: `from` (whose Cl the check used -- "Boss's Cl" when
         -- borrowed), `steel` (Nerves Of Steel's check against being
         -- Suppressed), and `auto` (the Outcast Leader's auto-pass).
-        __nqs_mundane_bus.emit({
+        __nqs_mundane_bus.send({
             kind = "roll",
             action = "Cool check",
             fighter = fighter and fighter.name or nil,
@@ -19636,7 +19676,7 @@ function rollNerve(player)
                         steel = n.steel and true or nil },
             from = n.from,
             why = n.title and tostring(n.title) ~= "Nerve Check" and tostring(n.title) or "Nerve Check",
-            player = tostring(color or player),
+            by = color or player,
         })
     end, "d6", title)
     return test
@@ -19705,7 +19745,7 @@ function ACTIVATION.rollGroup(n, player)
         -- `faces`/`total` are the second roll's). On failure, no friends
         -- activate; on pass, every friend within range flips to Group
         -- Activated.
-        __nqs_mundane_bus.emit({
+        __nqs_mundane_bus.send({
             kind = "roll",
             action = "Leadership check",
             fighter = fighter and fighter.name or nil,
@@ -19720,7 +19760,7 @@ function ACTIVATION.rollGroup(n, player)
                         activated_count = #test.activated,
                         far_count = #far },
             why = "Group Activation",
-            player = tostring(color or player),
+            by = color or player,
         })
     end
     ACTIVATION.rolling(title)
@@ -21814,7 +21854,7 @@ function ACTIVATION.moveBy(a, player, rgb, head)
         -- total distance (base + dice), which the recorder's post-game stats
         -- can slice by charge length.
         if #faces > 0 then
-            __nqs_mundane_bus.emit({
+            __nqs_mundane_bus.send({
                 kind = "roll",
                 action = tostring(a.key or "move"),
                 fighter = fighter and fighter.name or nil,
@@ -21822,7 +21862,7 @@ function ACTIVATION.moveBy(a, player, rgb, head)
                 direction = nil,
                 outcome = { inches = sum, base = total, dice_sum = sum - total },
                 label = a.label and tostring(a.label) or nil,
-                player = tostring(colorOf and colorOf(player) or player),
+                by = player,
             })
         end
         return sum
@@ -22138,6 +22178,152 @@ end
 -- reported as a change of the old one's wounds.
 __nqs_mundane_bus.card = { setFighter = setFighter }
 
+-- NQS fork (S2, antares-tts-tools SPEC "The event-publishing contract"):
+-- the card's one way onto the bus. Every card event goes through `send`,
+-- which fills what every event carries -- `fighter`, `by` (the name of
+-- whoever clicked or scripted it), and on an hp / status / condition /
+-- Out of Action change the `attack_id` of the attack under way on this
+-- card or the `cause` (a test's label, an action's name) -- then `emit`.
+-- `player` (the gang owner's name) and `color` (the gang's) are left to
+-- the recorder (game-recorder S1-l: it fills `player` from its fighter ->
+-- gang -> owner map): the card knows neither which seat owns its gang nor
+-- who sits there. A caller's `by` may be a Player, a seat colour or a
+-- name; it is published as a name.
+__nqs_mundane_bus.card.STATE = { hp = true, status = true, condition = true, out_of_action = true }
+function __nqs_mundane_bus.who(p)
+    if p == nil or p == "" or p == "nil" then return nil end
+    local ok, n = pcall(function()
+        local pl = p
+        if type(p) == "string" then
+            pl = nil
+            for _, q in ipairs(Player.getPlayers()) do if q.color == p then pl = q end end
+            if not pl then return p end
+        end
+        local s = pl.steam_name
+        if type(s) == "string" and s ~= "" then return s end
+        return pl.color
+    end)
+    if ok and type(n) == "string" and n ~= "" then return n end
+    return type(p) == "string" and p or nil
+end
+function __nqs_mundane_bus.send(ev)
+    local c = __nqs_mundane_bus.card
+    if ev.fighter == nil and fighter then ev.fighter = fighter.name end
+    ev.by = __nqs_mundane_bus.who(c.by or ev.by)
+    ev.player = nil
+    if ev.kind == "state_change" and c.STATE[ev.field or ""] and ev.attack_id == nil and ev.cause == nil then
+        if c.attack and os.time() - (c.attackAt or 0) <= (tonumber(CFG.seqStale) or 120) then
+            ev.attack_id = c.attack
+        elseif c.cause then ev.cause = c.cause end
+    end
+    __nqs_mundane_bus.emit(ev)
+end
+-- An attack's id, the same on every card it reaches: the attacking card's
+-- GUID and its own count of attacks (ACTIVATION.attackHeader's token).
+-- `from` is the attacker's GUID (a target's card has it as t.from); nil
+-- for this card's own. nil without a token, never the string "nil".
+function __nqs_mundane_bus.attackId(seq, from)
+    if seq == nil or seq == "" then return nil end
+    if from == nil or from == "" then
+        local ok, g = pcall(function() return self.getGUID() end)
+        from = ok and g or "?"
+    end
+    return tostring(from) .. ":" .. tostring(seq)
+end
+-- Runs fn() with `field` of the card's bus table set to `v` (the attack
+-- under way, a cause, who clicked), so the events fn publishes carry it;
+-- put back after, also when fn errors.
+function __nqs_mundane_bus.within(field, v, fn)
+    local c = __nqs_mundane_bus.card
+    local was = c[field]
+    c[field] = v
+    local ok, r = pcall(fn)
+    c[field] = was
+    if not ok then error(r, 0) end
+    return r
+end
+
+-- The hit roll of `attack` (ACTIVATION.attackDice; attack.bus: its dice's
+-- kinds, the Ammo die, the weapon), `faces` as thrown: published as
+-- `label = "Hit"`, the Ammo die after it as a roll of its own, `label =
+-- "Ammo"`, both in the attack's `group`. `outcome` nil: faces a re-roll
+-- (`why`) is about to replace -- published as they were, with no Ammo roll
+-- (the Ammo die is not thrown again); every hit roll after them is
+-- `reroll = true`.
+function __nqs_mundane_bus.hitRoll(attack, faces, outcome, target, targets, by, why)
+    local b = attack.bus or {}
+    local id = __nqs_mundane_bus.attackId(attack.seq)
+    local names
+    if type(targets) == "table" and #targets > 0 then
+        names = {}
+        for i, n in ipairs(targets) do names[i] = tostring(n) end
+    end
+    __nqs_mundane_bus.send({
+        kind = "roll", action = "hit roll", label = "Hit",
+        dice = __nqs_mundane_bus.hitDice(faces, b.kinds or {}, b.ammo),
+        direction = "gte", weapon = b.weapon, target = b.need,
+        target_fighter = target ~= nil and tostring(target) or nil, targets = names,
+        outcome = outcome or { rerolled = why or "re-roll" },
+        reroll = b.reroll and true or nil, reroll_why = b.reroll,
+        attack_id = id, group = id, by = by,
+    })
+    if not outcome then b.reroll = why or "re-roll" return end
+    local f = b.ammo and faces[b.ammo]
+    if f and b.ammoNeed then
+        __nqs_mundane_bus.send({
+            kind = "roll", action = "ammo roll", label = "Ammo",
+            dice = { { type = "D6", value = f, face = tostring(f), as = "ammo" } },
+            direction = "gte", weapon = b.weapon, target = b.ammoNeed,
+            outcome = { passed = f >= b.ammoNeed, spared = outcome.spared, state = outcome.state },
+            attack_id = id, group = id, by = by,
+        })
+    end
+end
+
+-- Pure (lua5.4-tested): a hit roll's faces as labelled dice. `kinds` the
+-- card's own per die ("d6" / "firepower"); `ammo` the Ammo die's index,
+-- which is left out (it is its own roll). Every D6 not the Ammo die is the
+-- hit die (an Unstable Template's Unstable die included).
+function __nqs_mundane_bus.hitDice(faces, kinds, ammo)
+    local out = {}
+    for i, f in ipairs(faces) do
+        if i ~= ammo then
+            local fp = kinds[i] == "firepower"
+            out[#out + 1] = { type = fp and "FIREPOWER" or "D6", value = f, face = tostring(f),
+                              as = fp and "firepower" or "hit" }
+        end
+    end
+    return out
+end
+
+-- Pure (lua5.4-tested): one throw of Injury dice split into its wounds'
+-- pools, in throw order. `sizes` each pool's dice (dice past them: one more pool);
+-- `kindOf` a face -> "out" / "serious" / "injured"; `best` the bearer keeps
+-- the better (a Bio-Booster's pair), else the worst for the fighter is the
+-- one used. Returns { { faces, used (index in the pool), result } ... }.
+function __nqs_mundane_bus.injuryPools(faces, sizes, kindOf, best)
+    local rank = best and { injured = 1, serious = 2, out = 3 } or { out = 1, serious = 2, injured = 3 }
+    local all, sum = {}, 0
+    for i, n in ipairs(sizes or {}) do all[i], sum = n, sum + n end
+    if sum < #faces then all[#all + 1] = #faces - sum end   -- dice no pool counted: one more pool
+    local pools, at = {}, 1
+    for _, n in ipairs(all) do
+        if at > #faces then break end
+        local p = { faces = {} }
+        for _ = 1, n do
+            if at > #faces then break end
+            p.faces[#p.faces + 1] = faces[at]
+            at = at + 1
+        end
+        for i, f in ipairs(p.faces) do
+            local k = kindOf(f) or "serious"
+            if not p.used or rank[k] < rank[p.result] then p.used, p.result = i, k end
+        end
+        pools[#pools + 1] = p
+    end
+    return pools
+end
+
 -- NQS fork (game-recorder !16): a permanent stat change on the bus, from the
 -- three setters that make one (keepStat, stepStat: field "stat", the kept
 -- numbers; setStat: field "statline", the statline's own strings). Only on a
@@ -22148,7 +22334,7 @@ function __nqs_mundane_bus.statChanged(field, key, from, to)
         from, to = from ~= nil and tostring(from) or nil, to ~= nil and tostring(to) or nil
     end
     if from == to then return end
-    __nqs_mundane_bus.emit({
+    __nqs_mundane_bus.send({
         kind = "state_change", action = field,
         fighter = fighter and fighter.name or nil,
         field = field, key = tostring(key), from = from, to = to,
@@ -22183,7 +22369,7 @@ function onActionsChanged(left)
     -- recorder diffs activation itself at keyframes.
     local c, to = __nqs_mundane_bus.card, tonumber(left) or 0
     if c.actionsLeft ~= nil and c.actionsLeft ~= to then
-        __nqs_mundane_bus.emit({
+        __nqs_mundane_bus.send({
             kind = "state_change", action = "actions_left",
             fighter = fighter and fighter.name or nil,
             field = "actions_left", from = c.actionsLeft, to = to,
@@ -22208,7 +22394,7 @@ function onWoundsChanged(current, max)
     -- NQS fork: wounds on the game-recorder bus (game-recorder !16).
     local c, to = __nqs_mundane_bus.card, tonumber(current) or 0
     if c.hp ~= nil and c.hp ~= to then
-        __nqs_mundane_bus.emit({
+        __nqs_mundane_bus.send({
             kind = "state_change", action = "hp",
             fighter = fighter and fighter.name or nil,
             field = "hp", from = c.hp, to = to, max = tonumber(max),
