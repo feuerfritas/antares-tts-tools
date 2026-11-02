@@ -16652,7 +16652,8 @@ function ACTIVATION.strike(t, player)
         local pr = type(w) == "table" and type(w.profiles) == "table" and w.profiles[tonumber(attack.profile) or 0]
         __nqs_mundane_bus.action(player, attack.action or (attack.melee and "fight" or "shoot"), {
             weapon = tostring(R.name(w) or attack.name or "Weapon"),
-            profile = type(pr) == "table" and pr.name and tostring(pr.name) or attack.profile,
+            profile = type(pr) == "table" and pr.name and tostring(pr.name)
+                or attack.profile ~= nil and tostring(attack.profile) or nil,
             mode = attack.mode == "rapid_fire" and "rapid_fire" or "single",
             aimed = attack.aimed and true or nil, targets = #names > 0 and names or nil,
         }, names[1], attack.free and true or nil)
@@ -22544,9 +22545,15 @@ function publishState()
     for i = 1, 10 do
         local w = weaponAt(i)
         for k, p in ipairs(w and type(w.profiles) == "table" and w.profiles or {}) do
-            if p.ammo or p.reliableUsed then
+            -- only the states a profile is in: out, jam, spent (Limited,
+            -- Single Shot). p.ammo also holds "combi" and "extra", which say
+            -- how the ammo button looks (R.ammoState), not what state the
+            -- profile is in: such a profile is fine. `profile` its name, or
+            -- its number as a string.
+            local st = (p.ammo == "out" or p.ammo == "jam" or p.ammo == "spent") and p.ammo or nil
+            if st or p.reliableUsed then
                 put({ field = "weapon", weapon = tostring(TRAIT_RULES.name(w) or w.name or i),
-                      profile = p.name and tostring(p.name) or k, to = p.ammo or "fine",
+                      profile = tostring(p.name or k), to = st or "fine",
                       reliable_used = p.reliableUsed and true or nil })
             end
         end
