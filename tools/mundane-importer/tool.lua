@@ -532,6 +532,8 @@ local MODEL = {
     -- model's description overrides it (see baseLine).
     BASE_SIZES = { 25, 28.5, 32, 40, 50, 60 },
     BASE_SNAP  = 2.5,
+    -- Oval bases (length x width, mm): the sizes a measured oval snaps to.
+    OVAL_SIZES = { {60, 35}, {75, 42}, {90, 52}, {105, 70}, {120, 92}, {170, 105} },
 
     MM_PER_INCH = 25.4,
 
@@ -578,9 +580,17 @@ end
 -- where it came from ("measured", "manual", "description", "default"),
 -- and for a measured one the raw size (mm), how it was measured and
 -- whether it was too far from every standard size to snap (`guess`).
-function MODEL.baseRecord(mm, source, raw, how, guess)
+-- It is round or oval: `shape`, `length` and `width` (inches, length >=
+-- width; equal when round) and, for an oval, `axis`, the model's LOCAL axis
+-- ("x" | "z") the length runs along. `diameter` and `mm` stay and mean the
+-- WIDTH, so a reader that only knows `diameter` behaves as before.
+function MODEL.baseRecord(mm, source, raw, how, guess, lengthMm, axis)
+    local oval = lengthMm ~= nil and lengthMm > mm + 0.01
     return { diameter = mm / MM_PER_INCH, mm = mm, source = source,
-             raw = raw, how = how, guess = guess or nil }
+             raw = raw, how = how, guess = guess or nil,
+             shape = oval and "oval" or "round",
+             length = (oval and lengthMm or mm) / MM_PER_INCH, width = mm / MM_PER_INCH,
+             axis = axis == "x" and "x" or "z" }
 end
 
 -- The smaller of the x and z sizes (world units ~ inches) of a bounds value
@@ -598,37 +608,77 @@ function MODEL.footprint(b)
     return math.min(x, z) * k
 end
 
--- The diameter of `obj`'s base in inches as measured, and how it was found
--- (nil when nothing worked). getBounds takes in the miniature attached on
--- top, so the model's own parts are tried first -- every call wrapped, as
--- what TTS's Component API hands back is not documented:
+-- The local sizes (x, z; the model's own axes) of a world-aligned bounds
+-- rectangle X by Z, for a model turned `yaw` degrees. A base is an ellipse,
+-- so the half-extents in the world are P = ax^2 cos^2 + az^2 sin^2 and
+-- Q = ax^2 sin^2 + az^2 cos^2, which is solved for ax and az. Near 45 degrees
+-- the two can't be told apart, and then (as for any base that is not an
+-- oval) both come out as the smaller side, the way a round base always was.
+function MODEL.localSizes(X, Z, yaw)
+    local c2 = math.cos(2 * math.rad(tonumber(yaw) or 0))
+    local P, Q = (X / 2) ^ 2, (Z / 2) ^ 2
+    if math.abs(c2) < 0.2 or math.abs(X - Z) < 1e-9 then
+        local m = math.min(X, Z)
+        return m, m
+    end
+    local sum, dif = P + Q, (P - Q) / c2
+    local ax2, az2 = (sum + dif) / 2, (sum - dif) / 2
+    if az2 <= 0 or ax2 <= 0 then
+        local m = math.min(X, Z)
+        return m, m
+    end
+    return 2 * math.sqrt(ax2), 2 * math.sqrt(az2)
+end
+
+-- The x and z sizes (world units ~ inches) of a bounds value as TTS hands it
+-- back (a table / Vector with `size`, or Unity's Bounds with `size` or
+-- `extents`, half the size), nil for anything else; turned into the model's
+-- local axes by `yaw` (nil: already local, as getBoundsNormalized is).
+function MODEL.sizesOf(b, yaw)
+    if b == nil then return nil end
+    local s, k = b.size, 1
+    if s == nil then s, k = b.extents, 2 end
+    if s == nil then return nil end
+    local x, z = tonumber(s.x or s[1]), tonumber(s.z or s[3])
+    if not (x and z) or x <= 0 or z <= 0 then return nil end
+    x, z = x * k, z * k
+    if yaw then return MODEL.localSizes(x, z, yaw) end
+    return x, z
+end
+
+-- The sizes of `obj`'s base in inches as measured -- x and z in the model's
+-- LOCAL axes -- and how they were found (nil when nothing worked).
+-- getBounds takes in the miniature attached on top, so the model's own
+-- parts are tried first -- every call wrapped, as what TTS's Component API
+-- hands back is not documented:
 --   1. the root's own MeshRenderer: the base's mesh alone (an attached
 --      miniature is a child object with renderers of its own)
---   2. the root's own colliders
---   3. getBoundsNormalized, then getBounds -- the whole model, of which the
---      smaller side (see footprint)
+--   2. the root's own colliders (only when no renderer gave one)
+--   3. getBoundsNormalized, then getBounds -- the whole model
 function MODEL.measureRaw(obj)
-    local footprint = MODEL.footprint
+    local yaw = 0
+    pcall(function() yaw = tonumber(obj.getRotation().y) or 0 end)
     local function try(fn)
-        local ok, v = pcall(fn)
-        return ok and tonumber(v) or nil
+        local ok, x, z = pcall(fn)
+        if ok and tonumber(x) and tonumber(z) then return x, z end
     end
-    local d = try(function() return footprint(obj.getComponent("MeshRenderer").get("bounds")) end)
-    if d then return d, "renderer" end
-    d = try(function()
-        local widest
+    local x, z = try(function() return MODEL.sizesOf(obj.getComponent("MeshRenderer").get("bounds"), yaw) end)
+    if x then return x, z, "renderer" end
+    x, z = try(function()
+        local wx, wz
         for _, c in ipairs(obj.getComponents()) do
             if tostring(c.name):find("Collider", 1, true) then
-                local ok, w = pcall(function() return footprint(c.get("bounds")) end)
-                if ok and w and w > (widest or 0) then widest = w end
+                local ok, cx, cz = pcall(function() return MODEL.sizesOf(c.get("bounds"), yaw) end)
+                if ok and cx and cx * cz > (wx and wx * wz or 0) then wx, wz = cx, cz end
             end
         end
-        return widest
+        return wx, wz
     end)
-    if d then return d, "collider" end
-    d = try(function() return footprint(obj.getBoundsNormalized()) end)
-        or try(function() return footprint(obj.getBounds()) end)
-    if d then return d, "bounds" end
+    if x then return x, z, "collider" end
+    x, z = try(function() return MODEL.sizesOf(obj.getBoundsNormalized(), nil) end)
+    if x then return x, z, "bounds" end
+    x, z = try(function() return MODEL.sizesOf(obj.getBounds(), yaw) end)
+    if x then return x, z, "bounds" end
 end
 
 -- The standard base size (mm) for a measurement: the nearest of BASE_SIZES
@@ -644,25 +694,108 @@ function MODEL.snapBase(mm)
     return under or near, true
 end
 
--- `obj`'s base, measured and snapped (nil when it can't be measured).
+-- The nearest OVAL_SIZES entry to an oval measured `lenMm` by `widMm`:
+-- its length, width, and whether either was further than BASE_SNAP from it
+-- (a guess); nil when the list is empty.
+function MODEL.snapOval(lenMm, widMm)
+    local best, bestErr
+    for _, s in ipairs(MODEL.OVAL_SIZES) do
+        local err = math.max(math.abs(s[1] - lenMm), math.abs(s[2] - widMm))
+        if not bestErr or err < bestErr then best, bestErr = s, err end
+    end
+    if not best then return nil end
+    return best[1], best[2], bestErr > MODEL.BASE_SNAP
+end
+
+-- `obj`'s base, measured and snapped (nil when it can't be measured). Axes
+-- within BASE_SNAP of each other are a round base, snapped as ever (by the
+-- smaller side). Otherwise an oval, snapped to OVAL_SIZES, its `axis` the
+-- longer local side. An oval that matches no known size is kept as measured
+-- (to the mm) and flagged a guess when a renderer gave it; when only a
+-- collider or the bounds did (they take in an overhang) it is the round
+-- base of the smaller side, as before.
 function MODEL.measureBase(obj)
-    local d, how = MODEL.measureRaw(obj)
-    if not d then return nil end
-    local raw = d * MM_PER_INCH
-    local mm, guess = MODEL.snapBase(raw)
-    return MODEL.baseRecord(mm, "measured", math.floor(raw * 10 + 0.5) / 10, how, guess)
+    local x, z, how = MODEL.measureRaw(obj)
+    if not x then return nil end
+    local xm, zm = x * MM_PER_INCH, z * MM_PER_INCH
+    local lenMm, widMm = math.max(xm, zm), math.min(xm, zm)
+    local axis = xm > zm and "x" or "z"
+    local raw = math.floor(widMm * 10 + 0.5) / 10
+    if lenMm - widMm > MODEL.BASE_SNAP then
+        local L, W, guess = MODEL.snapOval(lenMm, widMm)
+        if L and not guess then
+            return MODEL.baseRecord(W, "measured", raw, how, false, L, axis)
+        end
+        if how == "renderer" then
+            return MODEL.baseRecord(math.floor(widMm + 0.5), "measured", raw, how, true,
+                                    math.floor(lenMm + 0.5), axis)
+        end
+    end
+    local mm, guess = MODEL.snapBase(widMm)
+    return MODEL.baseRecord(mm, "measured", raw, how, guess)
 end
 
 -- The "Base: 32mm" line of a description (BBCode tags ignored; "mm"
--- optional): its size (mm) and the line as written, or nil. Short lines
+-- optional): its width (mm), the line as written, and, as an oval
+-- ("Base: 90x52mm", "Base: 90x52mm oval", "Base: 90 x 52"), its length (mm);
+-- nil when there is none. The larger number is the length. Short lines
 -- only, so no long pattern runs.
 function MODEL.baseLine(desc)
     for raw in (tostring(desc or "") .. "\n"):gmatch("([^\n]*)\n") do
         local line = raw:gsub("\r", "")
-        local bare = line:gsub("%[/?[%w%-]*%]", "")
-        local n = tonumber(bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(%d+%.?%d*)%s*[Mm]?[Mm]?%s*$"))
-        if n and n > 0 then return n, line end
+        local bare = line:gsub("%[/?[%w%-]*%]", ""):gsub("\195\151", "x")
+        local head = bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(.-)%s*$")
+        if head then
+            head = head:gsub("%s+[Oo][Vv][Aa][Ll]$", "")
+            local a, b = head:match("^(%d+%.?%d*)%s*[Mm]?[Mm]?%s*[xX]%s*(%d+%.?%d*)%s*[Mm]?[Mm]?$")
+            if not a then a, b = head:match("^(%d+%.?%d*)%s*[Mm]?[Mm]?$"), nil end
+            local n1, n2 = tonumber(a), tonumber(b)
+            if n1 and n1 > 0 and (n2 == nil or n2 > 0) then
+                if n2 and math.abs(n1 - n2) > 0.01 then
+                    return math.min(n1, n2), line, math.max(n1, n2)
+                end
+                return n2 and math.min(n1, n2) or n1, line
+            end
+        end
     end
+end
+
+-- A base as people read it: "32mm", "90x52mm oval".
+function MODEL.baseLabel(b)
+    if type(b) ~= "table" then return "?" end
+    local w = tonumber(b.mm) or (tonumber(b.diameter) or 0) * MM_PER_INCH
+    if b.shape == "oval" and tonumber(b.length) then
+        return string.format("%gx%gmm oval", math.floor(b.length * MM_PER_INCH + 0.5), math.floor(w + 0.5))
+    end
+    return string.format("%gmm", w)
+end
+
+-- The local axis ("x" | "z") an oval described only by its size faces
+-- along: the longer measured local side, else the model's own z.
+function MODEL.axisOf(obj)
+    local x, z = MODEL.measureRaw(obj)
+    return (x and z and x > z + 0.01) and "x" or "z"
+end
+
+-- The base a description line gives `obj` (nil without one): a round or an
+-- oval record, source "description". `prior`, a base already known with the
+-- same size, lends its axis, so the model is not measured again.
+function MODEL.baseFromLine(obj, desc, prior)
+    local w, line, l = MODEL.baseLine(desc)
+    if not w then return nil end
+    if not l then return MODEL.baseRecord(w, "description"), line end
+    local axis = prior and prior.shape == "oval" and prior.axis
+        and math.abs((tonumber(prior.width) or 0) * MM_PER_INCH - w) < 0.05
+        and math.abs((tonumber(prior.length) or 0) * MM_PER_INCH - l) < 0.05 and prior.axis
+    if not axis then
+        -- measured once per model and size: the card asks on every check
+        local okG, guid = pcall(function() return obj.getGUID() end)
+        local key = tostring(okG and guid or obj) .. ":" .. w .. "x" .. l
+        MODEL.axisMemo = MODEL.axisMemo or {}
+        axis = MODEL.axisMemo[key]
+        if not axis then axis = MODEL.axisOf(obj); MODEL.axisMemo[key] = axis end
+    end
+    return MODEL.baseRecord(w, "description", nil, nil, nil, l, axis), line
 end
 
 -- ── Height ────────────────────────────────────────────────────
@@ -1461,12 +1594,13 @@ end
 -- MODEL.measureBase). nil when it can't be measured (the card tries again
 -- itself once loaded).
 local function baseFor(obj, desc)
-    local mm = MODEL.baseLine(desc)
-    if mm then return MODEL.baseRecord(mm, "description") end
     local ok, b = callIfHas(obj, "getBase")
+    local described = MODEL.baseFromLine(obj, desc, ok and type(b) == "table" and b or nil)
+    if described then return described end
     if ok and type(b) == "table" and b.source == "manual" and tonumber(b.diameter) then
-        return { diameter = tonumber(b.diameter),
-                 mm = tonumber(b.mm) or tonumber(b.diameter) * MODEL.MM_PER_INCH, source = "manual" }
+        local d = tonumber(b.diameter)
+        return MODEL.baseRecord(tonumber(b.mm) or d * MODEL.MM_PER_INCH, "manual", nil, nil, nil,
+                                b.shape == "oval" and tonumber(b.length) and b.length * MODEL.MM_PER_INCH or nil, b.axis)
     end
     return MODEL.measureBase(obj)
 end
@@ -1474,9 +1608,12 @@ end
 -- How a base reads in the import summary.
 local function baseText(b)
     if not b then return "not measured (the card assumes its default)" end
-    local t = string.format("%gmm", b.mm)
+    local t = MODEL.baseLabel(b)
     if b.source ~= "measured" then return t .. " (" .. (b.source == "manual" and "set by hand" or "in description") .. ")" end
-    if b.guess then return t .. string.format(" (measured %gmm -- check it)", b.raw) end
+    if b.guess then
+        return t .. string.format(" (GUESSED from the model's %s, narrow side %gmm -- check it; put \"Base: %s\" in its description)",
+                                  tostring(b.how or "?"), b.raw or 0, t:gsub("%s+oval$", ""))
+    end
     return t
 end
 
@@ -1706,7 +1843,7 @@ local function runImport(rawText, player)
         for _, n in ipairs(notFound) do printToAll(IMPORT_PREFIX .. "    * " .. n, { 1, 0.85, 0.5 }) end
     end
     if #bases > 0 then
-        printToAll(IMPORT_PREFIX .. "Bases / Heights (put \"Base: XXmm\" in descriptions before import, if it is not recognized correctly):",
+        printToAll(IMPORT_PREFIX .. "Bases / Heights (put \"Base: XXmm\" (or \"Base: 90x52mm oval\") in descriptions before import, if it is not recognized correctly):",
                    { 0.6, 0.85, 1 })
         for _, n in ipairs(bases) do printToAll(IMPORT_PREFIX .. "    * " .. n, { 0.8, 0.92, 1 }) end
     end
@@ -2444,6 +2581,8 @@ local MODEL = {
     -- model's description overrides it (see baseLine).
     BASE_SIZES = { 25, 28.5, 32, 40, 50, 60 },
     BASE_SNAP  = 2.5,
+    -- Oval bases (length x width, mm): the sizes a measured oval snaps to.
+    OVAL_SIZES = { {60, 35}, {75, 42}, {90, 52}, {105, 70}, {120, 92}, {170, 105} },
 
     MM_PER_INCH = 25.4,
 
@@ -2490,9 +2629,17 @@ end
 -- where it came from ("measured", "manual", "description", "default"),
 -- and for a measured one the raw size (mm), how it was measured and
 -- whether it was too far from every standard size to snap (`guess`).
-function MODEL.baseRecord(mm, source, raw, how, guess)
+-- It is round or oval: `shape`, `length` and `width` (inches, length >=
+-- width; equal when round) and, for an oval, `axis`, the model's LOCAL axis
+-- ("x" | "z") the length runs along. `diameter` and `mm` stay and mean the
+-- WIDTH, so a reader that only knows `diameter` behaves as before.
+function MODEL.baseRecord(mm, source, raw, how, guess, lengthMm, axis)
+    local oval = lengthMm ~= nil and lengthMm > mm + 0.01
     return { diameter = mm / MM_PER_INCH, mm = mm, source = source,
-             raw = raw, how = how, guess = guess or nil }
+             raw = raw, how = how, guess = guess or nil,
+             shape = oval and "oval" or "round",
+             length = (oval and lengthMm or mm) / MM_PER_INCH, width = mm / MM_PER_INCH,
+             axis = axis == "x" and "x" or "z" }
 end
 
 -- The smaller of the x and z sizes (world units ~ inches) of a bounds value
@@ -2510,37 +2657,77 @@ function MODEL.footprint(b)
     return math.min(x, z) * k
 end
 
--- The diameter of `obj`'s base in inches as measured, and how it was found
--- (nil when nothing worked). getBounds takes in the miniature attached on
--- top, so the model's own parts are tried first -- every call wrapped, as
--- what TTS's Component API hands back is not documented:
+-- The local sizes (x, z; the model's own axes) of a world-aligned bounds
+-- rectangle X by Z, for a model turned `yaw` degrees. A base is an ellipse,
+-- so the half-extents in the world are P = ax^2 cos^2 + az^2 sin^2 and
+-- Q = ax^2 sin^2 + az^2 cos^2, which is solved for ax and az. Near 45 degrees
+-- the two can't be told apart, and then (as for any base that is not an
+-- oval) both come out as the smaller side, the way a round base always was.
+function MODEL.localSizes(X, Z, yaw)
+    local c2 = math.cos(2 * math.rad(tonumber(yaw) or 0))
+    local P, Q = (X / 2) ^ 2, (Z / 2) ^ 2
+    if math.abs(c2) < 0.2 or math.abs(X - Z) < 1e-9 then
+        local m = math.min(X, Z)
+        return m, m
+    end
+    local sum, dif = P + Q, (P - Q) / c2
+    local ax2, az2 = (sum + dif) / 2, (sum - dif) / 2
+    if az2 <= 0 or ax2 <= 0 then
+        local m = math.min(X, Z)
+        return m, m
+    end
+    return 2 * math.sqrt(ax2), 2 * math.sqrt(az2)
+end
+
+-- The x and z sizes (world units ~ inches) of a bounds value as TTS hands it
+-- back (a table / Vector with `size`, or Unity's Bounds with `size` or
+-- `extents`, half the size), nil for anything else; turned into the model's
+-- local axes by `yaw` (nil: already local, as getBoundsNormalized is).
+function MODEL.sizesOf(b, yaw)
+    if b == nil then return nil end
+    local s, k = b.size, 1
+    if s == nil then s, k = b.extents, 2 end
+    if s == nil then return nil end
+    local x, z = tonumber(s.x or s[1]), tonumber(s.z or s[3])
+    if not (x and z) or x <= 0 or z <= 0 then return nil end
+    x, z = x * k, z * k
+    if yaw then return MODEL.localSizes(x, z, yaw) end
+    return x, z
+end
+
+-- The sizes of `obj`'s base in inches as measured -- x and z in the model's
+-- LOCAL axes -- and how they were found (nil when nothing worked).
+-- getBounds takes in the miniature attached on top, so the model's own
+-- parts are tried first -- every call wrapped, as what TTS's Component API
+-- hands back is not documented:
 --   1. the root's own MeshRenderer: the base's mesh alone (an attached
 --      miniature is a child object with renderers of its own)
---   2. the root's own colliders
---   3. getBoundsNormalized, then getBounds -- the whole model, of which the
---      smaller side (see footprint)
+--   2. the root's own colliders (only when no renderer gave one)
+--   3. getBoundsNormalized, then getBounds -- the whole model
 function MODEL.measureRaw(obj)
-    local footprint = MODEL.footprint
+    local yaw = 0
+    pcall(function() yaw = tonumber(obj.getRotation().y) or 0 end)
     local function try(fn)
-        local ok, v = pcall(fn)
-        return ok and tonumber(v) or nil
+        local ok, x, z = pcall(fn)
+        if ok and tonumber(x) and tonumber(z) then return x, z end
     end
-    local d = try(function() return footprint(obj.getComponent("MeshRenderer").get("bounds")) end)
-    if d then return d, "renderer" end
-    d = try(function()
-        local widest
+    local x, z = try(function() return MODEL.sizesOf(obj.getComponent("MeshRenderer").get("bounds"), yaw) end)
+    if x then return x, z, "renderer" end
+    x, z = try(function()
+        local wx, wz
         for _, c in ipairs(obj.getComponents()) do
             if tostring(c.name):find("Collider", 1, true) then
-                local ok, w = pcall(function() return footprint(c.get("bounds")) end)
-                if ok and w and w > (widest or 0) then widest = w end
+                local ok, cx, cz = pcall(function() return MODEL.sizesOf(c.get("bounds"), yaw) end)
+                if ok and cx and cx * cz > (wx and wx * wz or 0) then wx, wz = cx, cz end
             end
         end
-        return widest
+        return wx, wz
     end)
-    if d then return d, "collider" end
-    d = try(function() return footprint(obj.getBoundsNormalized()) end)
-        or try(function() return footprint(obj.getBounds()) end)
-    if d then return d, "bounds" end
+    if x then return x, z, "collider" end
+    x, z = try(function() return MODEL.sizesOf(obj.getBoundsNormalized(), nil) end)
+    if x then return x, z, "bounds" end
+    x, z = try(function() return MODEL.sizesOf(obj.getBounds(), yaw) end)
+    if x then return x, z, "bounds" end
 end
 
 -- The standard base size (mm) for a measurement: the nearest of BASE_SIZES
@@ -2556,25 +2743,108 @@ function MODEL.snapBase(mm)
     return under or near, true
 end
 
--- `obj`'s base, measured and snapped (nil when it can't be measured).
+-- The nearest OVAL_SIZES entry to an oval measured `lenMm` by `widMm`:
+-- its length, width, and whether either was further than BASE_SNAP from it
+-- (a guess); nil when the list is empty.
+function MODEL.snapOval(lenMm, widMm)
+    local best, bestErr
+    for _, s in ipairs(MODEL.OVAL_SIZES) do
+        local err = math.max(math.abs(s[1] - lenMm), math.abs(s[2] - widMm))
+        if not bestErr or err < bestErr then best, bestErr = s, err end
+    end
+    if not best then return nil end
+    return best[1], best[2], bestErr > MODEL.BASE_SNAP
+end
+
+-- `obj`'s base, measured and snapped (nil when it can't be measured). Axes
+-- within BASE_SNAP of each other are a round base, snapped as ever (by the
+-- smaller side). Otherwise an oval, snapped to OVAL_SIZES, its `axis` the
+-- longer local side. An oval that matches no known size is kept as measured
+-- (to the mm) and flagged a guess when a renderer gave it; when only a
+-- collider or the bounds did (they take in an overhang) it is the round
+-- base of the smaller side, as before.
 function MODEL.measureBase(obj)
-    local d, how = MODEL.measureRaw(obj)
-    if not d then return nil end
-    local raw = d * MM_PER_INCH
-    local mm, guess = MODEL.snapBase(raw)
-    return MODEL.baseRecord(mm, "measured", math.floor(raw * 10 + 0.5) / 10, how, guess)
+    local x, z, how = MODEL.measureRaw(obj)
+    if not x then return nil end
+    local xm, zm = x * MM_PER_INCH, z * MM_PER_INCH
+    local lenMm, widMm = math.max(xm, zm), math.min(xm, zm)
+    local axis = xm > zm and "x" or "z"
+    local raw = math.floor(widMm * 10 + 0.5) / 10
+    if lenMm - widMm > MODEL.BASE_SNAP then
+        local L, W, guess = MODEL.snapOval(lenMm, widMm)
+        if L and not guess then
+            return MODEL.baseRecord(W, "measured", raw, how, false, L, axis)
+        end
+        if how == "renderer" then
+            return MODEL.baseRecord(math.floor(widMm + 0.5), "measured", raw, how, true,
+                                    math.floor(lenMm + 0.5), axis)
+        end
+    end
+    local mm, guess = MODEL.snapBase(widMm)
+    return MODEL.baseRecord(mm, "measured", raw, how, guess)
 end
 
 -- The "Base: 32mm" line of a description (BBCode tags ignored; "mm"
--- optional): its size (mm) and the line as written, or nil. Short lines
+-- optional): its width (mm), the line as written, and, as an oval
+-- ("Base: 90x52mm", "Base: 90x52mm oval", "Base: 90 x 52"), its length (mm);
+-- nil when there is none. The larger number is the length. Short lines
 -- only, so no long pattern runs.
 function MODEL.baseLine(desc)
     for raw in (tostring(desc or "") .. "\n"):gmatch("([^\n]*)\n") do
         local line = raw:gsub("\r", "")
-        local bare = line:gsub("%[/?[%w%-]*%]", "")
-        local n = tonumber(bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(%d+%.?%d*)%s*[Mm]?[Mm]?%s*$"))
-        if n and n > 0 then return n, line end
+        local bare = line:gsub("%[/?[%w%-]*%]", ""):gsub("\195\151", "x")
+        local head = bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(.-)%s*$")
+        if head then
+            head = head:gsub("%s+[Oo][Vv][Aa][Ll]$", "")
+            local a, b = head:match("^(%d+%.?%d*)%s*[Mm]?[Mm]?%s*[xX]%s*(%d+%.?%d*)%s*[Mm]?[Mm]?$")
+            if not a then a, b = head:match("^(%d+%.?%d*)%s*[Mm]?[Mm]?$"), nil end
+            local n1, n2 = tonumber(a), tonumber(b)
+            if n1 and n1 > 0 and (n2 == nil or n2 > 0) then
+                if n2 and math.abs(n1 - n2) > 0.01 then
+                    return math.min(n1, n2), line, math.max(n1, n2)
+                end
+                return n2 and math.min(n1, n2) or n1, line
+            end
+        end
     end
+end
+
+-- A base as people read it: "32mm", "90x52mm oval".
+function MODEL.baseLabel(b)
+    if type(b) ~= "table" then return "?" end
+    local w = tonumber(b.mm) or (tonumber(b.diameter) or 0) * MM_PER_INCH
+    if b.shape == "oval" and tonumber(b.length) then
+        return string.format("%gx%gmm oval", math.floor(b.length * MM_PER_INCH + 0.5), math.floor(w + 0.5))
+    end
+    return string.format("%gmm", w)
+end
+
+-- The local axis ("x" | "z") an oval described only by its size faces
+-- along: the longer measured local side, else the model's own z.
+function MODEL.axisOf(obj)
+    local x, z = MODEL.measureRaw(obj)
+    return (x and z and x > z + 0.01) and "x" or "z"
+end
+
+-- The base a description line gives `obj` (nil without one): a round or an
+-- oval record, source "description". `prior`, a base already known with the
+-- same size, lends its axis, so the model is not measured again.
+function MODEL.baseFromLine(obj, desc, prior)
+    local w, line, l = MODEL.baseLine(desc)
+    if not w then return nil end
+    if not l then return MODEL.baseRecord(w, "description"), line end
+    local axis = prior and prior.shape == "oval" and prior.axis
+        and math.abs((tonumber(prior.width) or 0) * MM_PER_INCH - w) < 0.05
+        and math.abs((tonumber(prior.length) or 0) * MM_PER_INCH - l) < 0.05 and prior.axis
+    if not axis then
+        -- measured once per model and size: the card asks on every check
+        local okG, guid = pcall(function() return obj.getGUID() end)
+        local key = tostring(okG and guid or obj) .. ":" .. w .. "x" .. l
+        MODEL.axisMemo = MODEL.axisMemo or {}
+        axis = MODEL.axisMemo[key]
+        if not axis then axis = MODEL.axisOf(obj); MODEL.axisMemo[key] = axis end
+    end
+    return MODEL.baseRecord(w, "description", nil, nil, nil, l, axis), line
 end
 
 -- ── Height ────────────────────────────────────────────────────
@@ -12927,6 +13197,11 @@ local function validBase(t)
     local d = tonumber(t.diameter)
     if not d or d <= 0 then return nil end
     t.diameter, t.mm = d, tonumber(t.mm) or d * MODEL.MM_PER_INCH
+    -- an older base (a round diameter only) is a round base of that width
+    local l = tonumber(t.length)
+    if t.shape ~= "oval" or not l or l < d then t.shape, l = "round", d end
+    t.length, t.width = l, d
+    t.axis = t.axis == "x" and "x" or "z"
     return t
 end
 
@@ -12967,8 +13242,8 @@ do
     -- the importer, or measured once and kept); else CFG.baseDefault.
     function currentBase()
         local ok, desc = pcall(function() return self.getDescription() end)
-        local mm = ok and MODEL.baseLine(desc)
-        if mm then return MODEL.baseRecord(mm, "description") end
+        local described = ok and MODEL.baseFromLine(self, desc, validBase(fighter.base))
+        if described then return described end
         if not validBase(fighter.base) then fighter.base = MODEL.measureBase(self) end
         return fighter.base or MODEL.baseRecord(CFG.baseDefault, "default")
     end
@@ -14888,7 +15163,9 @@ function cycleStatus()
     return setStatus(STATUSES[i % #STATUSES + 1].key)
 end
 
--- The base: { diameter = inches, mm =, source = } (see currentBase) -- a
+-- The base: { diameter = inches (the width), mm =, source =, shape =
+-- "round" | "oval", length / width = inches, axis = "x" | "z" } (see
+-- currentBase) -- a
 -- "Base: 32mm" line in the description first, then one set by setBase or
 -- passed in by the importer, else the model measured (once, then saved).
 function getBase() return currentBase() end
@@ -14898,15 +15175,26 @@ function getBase() return currentBase() end
 -- measures the model again. Returns the base now in use (a description
 -- line still wins).
 function setBase(v)
+    local len, axis
     if type(v) == "table" then
+        len, axis = tonumber(v.length), v.axis       -- (the length in mm, with `mm` the width)
         if v.mm == nil and v.value == nil and tonumber(v.diameter) then
             v = tonumber(v.diameter) * MODEL.MM_PER_INCH
         else
             v = v.mm or v.value
         end
     end
-    local mm = tonumber(v) or tonumber(tostring(v or ""):match("^%s*(%d+%.?%d*)%s*[Mm]?[Mm]?%s*$"))
-    fighter.base = (mm and mm > 0) and MODEL.baseRecord(mm, "manual") or MODEL.measureBase(self)
+    local mm = tonumber(v)
+    if not mm and v ~= nil then
+        -- "32mm", "90x52mm", "90x52mm oval": the line's own reading
+        local _line
+        mm, _line, len = MODEL.baseLine("Base: " .. tostring(v))
+    end
+    if mm and mm > 0 then
+        fighter.base = MODEL.baseRecord(mm, "manual", nil, nil, nil, len, axis or (len and MODEL.axisOf(self)))
+    else
+        fighter.base = MODEL.measureBase(self)
+    end
     return currentBase()
 end
 
