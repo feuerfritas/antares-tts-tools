@@ -1483,7 +1483,11 @@ end
 -- A Lua literal for a value (strings, numbers, booleans and tables of them),
 -- with table keys sorted so the same data always writes the same text.
 local function luaString(s)
-    return '"' .. s:gsub('[%c"\\]', function(c)
+    -- Explicit ASCII control range, not %c: MoonSharp (TTS) classifies by
+    -- UTF-16 code unit, and a non-ASCII char ("O\u{2082}") caught here came
+    -- out of c:byte() as a "\ddd" escape of a truncated unit -- "O?" on the card.
+    -- Chars above 127 pass through raw; the card script is UTF-8 text anyway.
+    return '"' .. s:gsub('[\1-\31\127"\\]', function(c)
         if c == "\n" then return "\\n" elseif c == "\r" then return "\\r"
         elseif c == "\t" then return "\\t" elseif c == '"' then return '\\"'
         elseif c == "\\" then return "\\\\" end
