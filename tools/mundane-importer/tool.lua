@@ -13126,7 +13126,9 @@ do
         -- TTS hands handlers a Player (userdata, not a table); a colour works too
         local p = player
         if type(player) == "string" then p = Player and Player[player] end
-        local ok, sel = pcall(function() return p.getSelectedObjects() end)
+        -- NQS fork (S2, #45): a script's stand-in names its targets instead
+        local ok, sel = __nqs_mundane_bus.selection(player)
+        if ok == nil then ok, sel = pcall(function() return p.getSelectedObjects() end) end
         local out = {}
         for _, obj in ipairs(ok and type(sel) == "table" and sel or {}) do
             local okT, tags = pcall(function() return obj.getTags() end)
@@ -14872,7 +14874,9 @@ end
 -- power cast with a fighter selected that has Void Soul asks first (see
 -- ACTIVATION.voidAsk): nothing happens until its player says Continue.
 function useAction(key, player)
+    local scripted = __nqs_mundane_bus.scripted(key)   -- NQS fork (S2, #45): { key, targets, by }
     key, player = keyValue(key, player)
+    player = scripted or player
     local a = ACTIONS[indexOf(ACTIONS, key) or 0] or SKILL.action(key)
     if not a then return false end
     if a.key == "reload" then return ACTIVATION.reload(player) end
@@ -15552,6 +15556,7 @@ end
 -- nothing: the ATK / RF button's rollAttack does, through it.
 function attackWith(t, player)
     if type(t) ~= "table" then return nil end
+    player = __nqs_mundane_bus.scripted(t) or player   -- NQS fork (S2, #45)
     local i, pi = tonumber(t.weapon), tonumber(t.profile)
     local w = i and weaponAt(i)
     local p = w and w.profiles and pi and w.profiles[pi]
@@ -16468,6 +16473,7 @@ end
 -- roll; Cursed and Flash -- the enemy hit hears of it (see traitHit). A
 -- Blind fighter's melee dice hit on a natural 6 only (ACTIVATION.hitRead).
 function rollAttack(t, player)
+    player = __nqs_mundane_bus.scripted(t) or player   -- NQS fork (S2, #45): { weapon, profile, targets, by }
     if ACTIVATION.noTarget(t, player) then return nil end
     if ACTIVATION.tooMany(t, player) then return nil end
     if ACTIVATION.lyingLow(t, player) then return nil end
@@ -17239,7 +17245,9 @@ function ACTIVATION.blast(attack, shot, player)
             blast = { attack = attack, shot = shot },
             done = function(yes, _, who)
                 ACTIVATION.drawTarget()
-                if yes then return ACTIVATION.blastGo(attack, shot, who or player) end
+                -- NQS fork (S2, #45): a scripted attack's targets are the Blast's too
+                local by = __nqs_mundane_bus.selection(player) and player or who or player
+                if yes then return ACTIVATION.blastGo(attack, shot, by) end
                 ACTIVATION.sayAttack("BLAST", shot.what, "called off -- nobody hit", COL.valueMod)
                 ACTIVATION.seqDone(attack.seq)
             end })
@@ -19641,6 +19649,7 @@ end
 -- panel's die rolls the check (see rollNerve). Returns the Ld to roll
 -- against (nil when Out of Action).
 function groupActivation(player)
+    player = __nqs_mundane_bus.scripted(player) or player   -- NQS fork (S2, #45): { targets, by }
     if fighter.outOfAction then return nil end
     ACTIVATION.nerveLight(false)
     local group, far = ACTIVATION.groupOf(ACTIVATION.picked(player))
@@ -22358,6 +22367,7 @@ __nqs_mundane_bus.card = { setFighter = setFighter }
 __nqs_mundane_bus.card.STATE = { hp = true, status = true, condition = true, out_of_action = true }
 function __nqs_mundane_bus.who(p)
     if p == nil or p == "" or p == "nil" then return nil end
+    if type(p) == "table" and p.scripted then return p.by or p.color end   -- a script's stand-in (#45)
     local ok, n = pcall(function()
         local pl = p
         if type(p) == "string" then
@@ -22488,6 +22498,29 @@ function publishState()
         if on then put({ field = "item", item = tostring(key), to = "used" }) end
     end
     return n
+end
+
+-- NQS fork (S2, #45, "Scriptable without a selection"): a handler called
+-- through obj.call takes one table; with `targets` (a list of GUIDs) or
+-- `by` (a name: "agent") in it, it stands for the player. That stand-in
+-- goes wherever the clicker would -- ACTIVATION.picked then takes the
+-- fighters from `targets` instead of a selection, and `by` is published as
+-- who did it. nil for any other argument.
+function __nqs_mundane_bus.scripted(t)
+    if type(t) ~= "table" or not (type(t.targets) == "table" or t.by ~= nil) then return nil end
+    return { targets = type(t.targets) == "table" and t.targets or {}, by = t.by ~= nil and tostring(t.by) or nil,
+             color = type(t.color) == "string" and t.color or nil, scripted = true }
+end
+-- The objects a stand-in (see scripted) selects: true and its targets' objects
+-- (a GUID with no object left out); nil for a real player.
+function __nqs_mundane_bus.selection(player)
+    if type(player) ~= "table" or not player.scripted then return nil end
+    local out = {}
+    for _, g in ipairs(player.targets or {}) do
+        local ok, obj = pcall(function() return getObjectFromGUID(tostring(g)) end)
+        if ok and obj then out[#out + 1] = obj end
+    end
+    return true, out
 end
 
 -- An attack's id, the same on every card it reaches: the attacking card's
