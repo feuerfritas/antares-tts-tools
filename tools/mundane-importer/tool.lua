@@ -22471,6 +22471,9 @@ end
 -- card last published (seeded by setFighter, so a load is no change);
 -- `why` says what took a Ready marker (ACTIVATION.loseMark).
 function __nqs_mundane_bus.readiness(why)
+    -- onActionsChanged / setGroupActivated can run before onLoad's
+    -- Wait.frames has seeded the fighter: nothing to compare yet
+    if not fighter then return end
     local c = __nqs_mundane_bus.card
     local now = fighter.activation or "activated"
     local key = now .. "|" .. tostring(fighter.grouped == true) .. "|" .. tostring(fighter.readyMarks)
