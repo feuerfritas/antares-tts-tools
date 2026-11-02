@@ -117,5 +117,81 @@ check(r.axis == "z", "unmeasurable: local z")
 r = MODEL.baseFromLine({}, "Base: 32mm"); check(r.shape == "round" and r.mm == 32, "round line")
 check(MODEL.baseFromLine({}, "nothing") == nil, "no line")
 
+-- ── baseGap: round against round is exactly what it was ────
+local gapSrc = assert(src:match("(local function baseGap%(a, b%).-\nend)\n"), "baseGap not found")
+local baseGap = assert(load("local MODEL = ...\n" .. gapSrc .. "\nreturn baseGap", "baseGap"))(MODEL)
+math.randomseed(20261102)
+for i = 1, 5000 do
+    local a = { x = math.random() * 60 - 30, z = math.random() * 60 - 30, r = (25 + math.random() * 35) / MM / 2 }
+    local b = { x = math.random() * 60 - 30, z = math.random() * 60 - 30, r = (25 + math.random() * 35) / MM / 2 }
+    local old = math.sqrt((a.x - b.x) ^ 2 + (a.z - b.z) ^ 2) - a.r - b.r
+    if math.abs(baseGap(a, b) - old) > 1e-9 then check(false, "round-vs-round baseGap changed") break end
+    if i == 5000 then check(true, "round-vs-round") end
+end
+-- close ones, overlapping included (the engagement range)
+for i = 1, 2000 do
+    local r1, r2 = (25 + math.random() * 35) / MM / 2, (25 + math.random() * 35) / MM / 2
+    local d = r1 + r2 + (math.random() * 3 - 1)
+    local a, b = { x = 0, z = 0, r = r1 }, { x = d, z = 0, r = r2 }
+    near(baseGap(a, b), d - r1 - r2, 0.001, "close round gap")
+end
+
+-- ── ovals ──────────────────────────────────────────────────
+local OVAL = MODEL.baseRecord(52, "description", nil, nil, nil, 90, "x")
+local A, B = 90 / MM / 2, 52 / MM / 2
+local function ent(x, z, base, yaw)
+    local e = { x = x, z = z, r = base.diameter / 2 }
+    e.fp = MODEL.footprintOf(base, yaw)
+    return e
+end
+local R25 = MODEL.baseRecord(25, "description")
+local r25 = 25 / MM / 2
+for _, d in ipairs({ 0.5, 1.5, 3, 5 }) do
+    local o = ent(0, 0, OVAL, 0)   -- local x along world: yaw 0 -> (cos, -sin) = (1, 0)
+    -- end-on: round base along the length axis
+    near(baseGap(o, ent(d + A + r25, 0, R25, 0)), d, 0.001, "end-on gap " .. d)
+    near(baseGap(ent(d + A + r25, 0, R25, 0), o), d, 0.001, "end-on gap, swapped " .. d)
+    -- side-on: round base across the width
+    near(baseGap(o, ent(0, d + B + r25, R25, 0)), d, 0.001, "side-on gap " .. d)
+    -- turned a quarter: the length now runs along world z
+    local t = ent(0, 0, OVAL, 90)
+    near(baseGap(t, ent(0, d + A + r25, R25, 0)), d, 0.001, "turned, end-on " .. d)
+    near(baseGap(t, ent(d + B + r25, 0, R25, 0)), d, 0.001, "turned, side-on " .. d)
+end
+-- the same centre distance reads a larger gap side-on than end-on
+do
+    local o, dist = ent(0, 0, OVAL, 0), 3
+    check(baseGap(o, ent(dist, 0, R25, 0)) < baseGap(o, ent(0, dist, R25, 0)), "side-on gap is larger at the same distance")
+end
+-- touching reads 0; overlapping reads negative by the depth on the line of centres
+near(baseGap(ent(0, 0, OVAL, 0), ent(A + r25, 0, R25, 0)), 0, 0.001, "touching reads 0")
+near(baseGap(ent(0, 0, OVAL, 0), ent(A + r25 - 0.3, 0, R25, 0)), -0.3, 0.001, "overlap reads -depth")
+check(baseGap(ent(0, 0, OVAL, 0), ent(0, 0, R25, 0)) < 0, "same centre overlaps")
+-- oval against oval: end to end, and crossed
+near(baseGap(ent(0, 0, OVAL, 0), ent(2 * A + 1, 0, OVAL, 0)), 1, 0.001, "oval end to end")
+near(baseGap(ent(0, 0, OVAL, 0), ent(0, 2 * B + 1, OVAL, 0)), 1, 0.001, "oval side by side")
+check(baseGap(ent(0, 0, OVAL, 0), ent(0, 0, OVAL, 90)) < 0, "crossed ovals overlap")
+check(baseGap(ent(0, 0, OVAL, 0), ent(0.3, 0.3, OVAL, 90)) < 0, "crossed ovals, offset, overlap")
+-- the polygon is within 0.01" of the true ellipse: round base against an oval at 35 degrees
+for _, ang in ipairs({ 20, 35, 50, 70 }) do
+    local d = 4
+    local cx, cz = d * math.cos(math.rad(ang)), d * math.sin(math.rad(ang))
+    local best = math.huge                       -- nearest point of the true ellipse to the round base's centre
+    for k = 0, 7199 do
+        local t = k * math.pi / 3600
+        local px, pz = A * math.cos(t), B * math.sin(t)
+        best = math.min(best, math.sqrt((px - cx) ^ 2 + (pz - cz) ^ 2))
+    end
+    near(baseGap(ent(0, 0, OVAL, 0), ent(cx, cz, R25, 0)), best - r25, 0.011, "polygon vs true ellipse at " .. ang)
+end
+-- footprintOf: a round base has none; the axis follows the model's turn
+check(MODEL.footprintOf(R25, 40) == nil, "round has no fp")
+do
+    local fp = MODEL.footprintOf(MODEL.baseRecord(52, "x", nil, nil, nil, 90, "z"), 90)
+    near(fp.ux, 1, 1e-9, "local z at yaw 90 points along world +x"); near(fp.uz, 0, 1e-9, "uz")
+    fp = MODEL.footprintOf(OVAL, 90)
+    near(fp.ux, 0, 1e-9, "local x at yaw 90 points along world -z"); near(fp.uz, -1, 1e-9, "uz -1")
+end
+
 if fails > 0 then print(fails .. " of " .. n .. " checks FAILED"); os.exit(1) end
 print("footprint_spec: " .. n .. " checks passed")

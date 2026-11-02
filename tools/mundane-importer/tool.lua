@@ -798,6 +798,106 @@ function MODEL.baseFromLine(obj, desc, prior)
     return MODEL.baseRecord(w, "description", nil, nil, nil, l, axis), line
 end
 
+-- The model's turn about y in degrees (0 when it can't be read).
+function MODEL.yawOf(obj)
+    local ok, r = pcall(function() return obj.getRotation() end)
+    return ok and r and tonumber(r.y or r[2]) or 0
+end
+
+-- ── Distances between footprints ─────────────────────────────
+
+-- A footprint on the table as the card's table entries carry it: { x, z, r }
+-- for a round base (r its radius, inches), and for an oval also
+-- `fp = { length, width, ux, uz }` (inches; u the unit vector of the length
+-- axis in the world x/z plane). `fp` is nil for a round base.
+-- footprintOf makes the `fp` of a base record `base` for a model turned
+-- `yaw` degrees about y (as TTS reports it: local z points along
+-- (sin yaw, cos yaw), local x along (cos yaw, -sin yaw)); nil for a round base.
+function MODEL.footprintOf(base, yaw)
+    local l, w = tonumber(base and base.length), tonumber(base and (base.width or base.diameter))
+    if not (l and w) or base.shape ~= "oval" or l <= w + 0.01 then return nil end
+    local t = math.rad(tonumber(yaw) or 0)
+    local ux, uz = math.sin(t), math.cos(t)                  -- local z
+    if base.axis == "x" then ux, uz = math.cos(t), -math.sin(t) end
+    return { length = l, width = w, ux = ux, uz = uz }
+end
+
+-- The 32 corners of the polygon standing in for a footprint's ellipse
+-- (a round one is a circle): inscribed, so within 0.005 x the half-length
+-- of the curve -- under 0.01" for the biggest base.
+function MODEL.footprintPoly(e)
+    local A, B, ux, uz = e.r, e.r, 1, 0
+    if e.fp then A, B, ux, uz = e.fp.length / 2, e.fp.width / 2, e.fp.ux, e.fp.uz end
+    local pts = {}
+    for k = 0, 31 do
+        local t = k * math.pi / 16
+        local c, s = A * math.cos(t), B * math.sin(t)
+        pts[#pts + 1] = { e.x + c * ux - s * uz, e.z + c * uz + s * ux }
+    end
+    return pts
+end
+
+-- The gap between two footprints on the table plane, in inches: the
+-- shortest distance between their polygons (see footprintPoly), or when they
+-- overlap, minus the depth along the line of their centres (never above 0).
+-- a, b: { x, z, r, fp }. Two round bases are measured by baseGap's own
+-- formula, which is why this is only asked when one of them is an oval.
+function MODEL.footprintGap(a, b)
+    local P, Q = MODEL.footprintPoly(a), MODEL.footprintPoly(b)
+    -- separating axis: the edge normals (the polygons are convex)
+    local sep = -math.huge
+    for _, poly in ipairs({ P, Q }) do
+        for i = 1, 16 do
+            local p, q = poly[i], poly[i + 1]
+            local nx, nz = -(q[2] - p[2]), q[1] - p[1]
+            local len = math.sqrt(nx * nx + nz * nz)
+            nx, nz = nx / len, nz / len
+            local pmin, pmax, qmin, qmax = math.huge, -math.huge, math.huge, -math.huge
+            for k = 1, 32 do
+                local dp = P[k][1] * nx + P[k][2] * nz
+                local dq = Q[k][1] * nx + Q[k][2] * nz
+                if dp < pmin then pmin = dp end
+                if dp > pmax then pmax = dp end
+                if dq < qmin then qmin = dq end
+                if dq > qmax then qmax = dq end
+            end
+            local g = math.max(qmin - pmax, pmin - qmax)
+            if g > sep then sep = g end
+        end
+    end
+    if sep > 1e-9 then
+        -- apart: the nearest a corner of one is to an edge of the other
+        local best = math.huge
+        local function against(A, B)
+            for k = 1, 32 do
+                local px, pz = A[k][1], A[k][2]
+                for i = 1, 32 do
+                    local s, e = B[i], B[i % 32 + 1]
+                    local dx, dz = e[1] - s[1], e[2] - s[2]
+                    local t = ((px - s[1]) * dx + (pz - s[2]) * dz) / (dx * dx + dz * dz)
+                    t = t < 0 and 0 or (t > 1 and 1 or t)
+                    local ex, ez = px - (s[1] + t * dx), pz - (s[2] + t * dz)
+                    local d2 = ex * ex + ez * ez
+                    if d2 < best then best = d2 end
+                end
+            end
+        end
+        against(P, Q); against(Q, P)
+        return math.sqrt(best)
+    end
+    -- overlapping (or touching): how far the outlines reach into each other
+    -- along the line of centres
+    local dx, dz = b.x - a.x, b.z - a.z
+    local dist = math.sqrt(dx * dx + dz * dz)
+    if dist < 1e-9 then dx, dz, dist = 1, 0, 0 else dx, dz = dx / dist, dz / dist end
+    local ha, hb = -math.huge, -math.huge
+    for k = 1, 32 do
+        ha = math.max(ha, (P[k][1] - a.x) * dx + (P[k][2] - a.z) * dz)
+        hb = math.max(hb, -((Q[k][1] - b.x) * dx + (Q[k][2] - b.z) * dz))
+    end
+    return math.min(0, dist - ha - hb)
+end
+
 -- ── Height ────────────────────────────────────────────────────
 
 -- The model's height -- its top, miniature and all, above its origin --
@@ -2845,6 +2945,106 @@ function MODEL.baseFromLine(obj, desc, prior)
         if not axis then axis = MODEL.axisOf(obj); MODEL.axisMemo[key] = axis end
     end
     return MODEL.baseRecord(w, "description", nil, nil, nil, l, axis), line
+end
+
+-- The model's turn about y in degrees (0 when it can't be read).
+function MODEL.yawOf(obj)
+    local ok, r = pcall(function() return obj.getRotation() end)
+    return ok and r and tonumber(r.y or r[2]) or 0
+end
+
+-- ── Distances between footprints ─────────────────────────────
+
+-- A footprint on the table as the card's table entries carry it: { x, z, r }
+-- for a round base (r its radius, inches), and for an oval also
+-- `fp = { length, width, ux, uz }` (inches; u the unit vector of the length
+-- axis in the world x/z plane). `fp` is nil for a round base.
+-- footprintOf makes the `fp` of a base record `base` for a model turned
+-- `yaw` degrees about y (as TTS reports it: local z points along
+-- (sin yaw, cos yaw), local x along (cos yaw, -sin yaw)); nil for a round base.
+function MODEL.footprintOf(base, yaw)
+    local l, w = tonumber(base and base.length), tonumber(base and (base.width or base.diameter))
+    if not (l and w) or base.shape ~= "oval" or l <= w + 0.01 then return nil end
+    local t = math.rad(tonumber(yaw) or 0)
+    local ux, uz = math.sin(t), math.cos(t)                  -- local z
+    if base.axis == "x" then ux, uz = math.cos(t), -math.sin(t) end
+    return { length = l, width = w, ux = ux, uz = uz }
+end
+
+-- The 32 corners of the polygon standing in for a footprint's ellipse
+-- (a round one is a circle): inscribed, so within 0.005 x the half-length
+-- of the curve -- under 0.01" for the biggest base.
+function MODEL.footprintPoly(e)
+    local A, B, ux, uz = e.r, e.r, 1, 0
+    if e.fp then A, B, ux, uz = e.fp.length / 2, e.fp.width / 2, e.fp.ux, e.fp.uz end
+    local pts = {}
+    for k = 0, 31 do
+        local t = k * math.pi / 16
+        local c, s = A * math.cos(t), B * math.sin(t)
+        pts[#pts + 1] = { e.x + c * ux - s * uz, e.z + c * uz + s * ux }
+    end
+    return pts
+end
+
+-- The gap between two footprints on the table plane, in inches: the
+-- shortest distance between their polygons (see footprintPoly), or when they
+-- overlap, minus the depth along the line of their centres (never above 0).
+-- a, b: { x, z, r, fp }. Two round bases are measured by baseGap's own
+-- formula, which is why this is only asked when one of them is an oval.
+function MODEL.footprintGap(a, b)
+    local P, Q = MODEL.footprintPoly(a), MODEL.footprintPoly(b)
+    -- separating axis: the edge normals (the polygons are convex)
+    local sep = -math.huge
+    for _, poly in ipairs({ P, Q }) do
+        for i = 1, 16 do
+            local p, q = poly[i], poly[i + 1]
+            local nx, nz = -(q[2] - p[2]), q[1] - p[1]
+            local len = math.sqrt(nx * nx + nz * nz)
+            nx, nz = nx / len, nz / len
+            local pmin, pmax, qmin, qmax = math.huge, -math.huge, math.huge, -math.huge
+            for k = 1, 32 do
+                local dp = P[k][1] * nx + P[k][2] * nz
+                local dq = Q[k][1] * nx + Q[k][2] * nz
+                if dp < pmin then pmin = dp end
+                if dp > pmax then pmax = dp end
+                if dq < qmin then qmin = dq end
+                if dq > qmax then qmax = dq end
+            end
+            local g = math.max(qmin - pmax, pmin - qmax)
+            if g > sep then sep = g end
+        end
+    end
+    if sep > 1e-9 then
+        -- apart: the nearest a corner of one is to an edge of the other
+        local best = math.huge
+        local function against(A, B)
+            for k = 1, 32 do
+                local px, pz = A[k][1], A[k][2]
+                for i = 1, 32 do
+                    local s, e = B[i], B[i % 32 + 1]
+                    local dx, dz = e[1] - s[1], e[2] - s[2]
+                    local t = ((px - s[1]) * dx + (pz - s[2]) * dz) / (dx * dx + dz * dz)
+                    t = t < 0 and 0 or (t > 1 and 1 or t)
+                    local ex, ez = px - (s[1] + t * dx), pz - (s[2] + t * dz)
+                    local d2 = ex * ex + ez * ez
+                    if d2 < best then best = d2 end
+                end
+            end
+        end
+        against(P, Q); against(Q, P)
+        return math.sqrt(best)
+    end
+    -- overlapping (or touching): how far the outlines reach into each other
+    -- along the line of centres
+    local dx, dz = b.x - a.x, b.z - a.z
+    local dist = math.sqrt(dx * dx + dz * dz)
+    if dist < 1e-9 then dx, dz, dist = 1, 0, 0 else dx, dz = dx / dist, dz / dist end
+    local ha, hb = -math.huge, -math.huge
+    for k = 1, 32 do
+        ha = math.max(ha, (P[k][1] - a.x) * dx + (P[k][2] - a.z) * dz)
+        hb = math.max(hb, -((Q[k][1] - b.x) * dx + (Q[k][2] - b.z) * dz))
+    end
+    return math.min(0, dist - ha - hb)
 end
 
 -- ── Height ────────────────────────────────────────────────────
@@ -13228,7 +13428,10 @@ end
 
 -- Base to base on the table plane (x / z): the distance between the centres
 -- less both radii, in inches (negative: overlapping). a, b: { x, z, r }.
+-- An oval base (a.fp / b.fp, see MODEL.footprintOf) is measured by its
+-- outline (MODEL.footprintGap); two round bases keep the plain formula.
 local function baseGap(a, b)
+    if a.fp or b.fp then return MODEL.footprintGap(a, b) end
     return math.sqrt((a.x - b.x) ^ 2 + (a.z - b.z) ^ 2) - a.r - b.r
 end
 
@@ -13282,14 +13485,17 @@ do
                 local okF, f = ACTIVATION.ask(obj, "getFighter")
                 if okF and type(f) == "table" and f.status then
                     local b = validBase(f.base) or MODEL.measureBase(obj) or MODEL.baseRecord(CFG.baseDefault, "default")
-                    info = { name = f.name, status = f.status, diameter = b.diameter, rank = f.rank, old = true }
+                    info = { name = f.name, status = f.status, diameter = b.diameter, rank = f.rank, old = true,
+                             shape = b.shape, length = b.length, axis = b.axis }
                 end
             end
         end
         if not (info and info.status) or info.out then return nil end
         local d = tonumber(info.diameter) or CFG.baseDefault / MODEL.MM_PER_INCH
+        local fp = MODEL.footprintOf({ shape = info.shape, length = info.length, width = d, axis = info.axis },
+                                     MODEL.yawOf(obj))
         return { obj = obj, self = me, old = info.old == true, gang = gang, name = tostring(info.name or "?"),
-                 status = info.status, r = d / 2, x = pos.x, y = pos.y, z = pos.z,
+                 status = info.status, r = d / 2, fp = fp, x = pos.x, y = pos.y, z = pos.z,
                  rank = info.rank, cl = tonumber(info.cl), t = tonumber(info.t), s = tonumber(info.s),
                  activation = info.activation, master = info.master == true,
                  fearsome = info.fearsome == true, ironJaw = tonumber(info.ironJaw),
@@ -13607,7 +13813,10 @@ do
         if tonumber(o.within) then
             local big = 0
             for _, mm in ipairs(MODEL.BASE_SIZES) do big = math.max(big, tonumber(mm) or 0) end
-            big = math.max(big / MODEL.MM_PER_INCH, tonumber(currentBase().diameter) or 0)
+            -- (an oval reaches by its length, not its width)
+            for _, ov in ipairs(MODEL.OVAL_SIZES) do big = math.max(big, ov[1]) end
+            big = math.max(big / MODEL.MM_PER_INCH, tonumber(currentBase().length) or 0,
+                           tonumber(currentBase().diameter) or 0)
             local hops = tonumber(o.hops) or 1
             reach = hops * (tonumber(o.within) + CFG.engageSlack + big) + 1
             spots = { positionOf(self) }
@@ -13825,7 +14034,7 @@ do
         me = me or tableEntry(self)
         local out = {}
         for _, o in ipairs(me and all or {}) do
-            if not o.self and o.gang == me.gang and baseGap(me, o) + 2 * o.r <= range + CFG.engageSlack then
+            if not o.self and o.gang == me.gang and baseGap(me, o) + 2 * (o.fp and o.fp.length / 2 or o.r) <= range + CFG.engageSlack then
                 out[#out + 1] = o
             end
         end
@@ -14240,7 +14449,7 @@ do
             all[#all + 1] = me
         end
 
-        local was = engage.spot and { x = engage.spot.x, y = engage.spot.y, z = engage.spot.z, r = me.r }
+        local was = engage.spot and { x = engage.spot.x, y = engage.spot.y, z = engage.spot.z, r = me.r, fp = me.fp }
         local affected = { me }
         for _, f in ipairs(all) do
             if f ~= me and f.gang ~= me.gang and (inReach(me, f) or (was and inReach(was, f))) then
@@ -15260,7 +15469,9 @@ function baseToBase(other)
         local ok, v = ACTIVATION.ask(other, "getBase")
         ob = (ok and validBase(v)) or MODEL.measureBase(other) or MODEL.baseRecord(CFG.baseDefault, "default")
     end
-    a.r, b.r = currentBase().diameter / 2, ob.diameter / 2
+    local mine = currentBase()
+    a.r, b.r = mine.diameter / 2, ob.diameter / 2
+    a.fp, b.fp = MODEL.footprintOf(mine, MODEL.yawOf(self)), MODEL.footprintOf(validBase(ob), MODEL.yawOf(other))
     return baseGap(a, b)
 end
 
@@ -15304,7 +15515,9 @@ function engageInfo()
     local immune = ACTIVATION.immunity()
     local cloak, soul = SKILL.with("refraction")[1], SKILL.with("voidSoul")[1]
     local agMod, agRr = ACTIVATION.agilityMod(), ACTIVATION.agilityReroll()
-    return { name = fighter.name, status = fighter.status, diameter = currentBase().diameter,
+    local base = currentBase()
+    return { name = fighter.name, status = fighter.status, diameter = base.diameter,
+             shape = base.shape, length = base.length, axis = base.axis,
              ironWill = will > 0 and will or nil, wyrd = wil and true or nil, wil = wil,
              assist = assist > 0 and assist or nil, assistWith = assist > 0 and table.concat(kits, ", ") or nil,
              out = fighter.outOfAction == true or nil, activation = fighter.activation,
