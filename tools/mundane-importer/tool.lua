@@ -105,6 +105,49 @@ if __nqs_mundane_bus == nil then
   end
 end
 
+-- NQS fork (S2, "Readiness, refresh and a snapshot"): the Importer says
+-- when the cards it (re)scripted have loaded, so a subscriber need not poll
+-- them until they answer. `objs` the models, `before` each one's
+-- MUNDA_STAMP before its script was written (a card sets it anew on every
+-- load; nil for a model that had none): once every model still on the
+-- table has a new one -- or after 20 s, `timeout` then true --
+-- done(guids, timeout). Functions on the bus table, not locals: this
+-- chunk is close to Lua's 200-local ceiling.
+function __nqs_mundane_bus.stampOf(obj)
+    local ok, v = pcall(function() return obj.getVar("MUNDA_STAMP") end)
+    return ok and v or nil
+end
+function __nqs_mundane_bus.whenLoaded(objs, before, done)
+    local guids = {}
+    for i, o in ipairs(objs) do
+        local ok, g = pcall(function() return o.getGUID() end)
+        guids[i] = ok and g or nil
+    end
+    local function loaded()
+        for i, o in ipairs(objs) do
+            local ok, gone = pcall(function() return o == nil or o.isDestroyed() end)
+            if ok and not gone then
+                local now = __nqs_mundane_bus.stampOf(o)
+                if now == nil or now == before[i] then return false end
+            end
+        end
+        return true
+    end
+    Wait.condition(function() done(guids, false) end, loaded, 20, function() done(guids, true) end)
+end
+-- models_refreshed {guids} (a subscriber caching a card's functions
+-- refreshes those), and after an import mundane_ready {cards}.
+function __nqs_mundane_bus.refreshed(objs, before, cards)
+    if #objs == 0 then
+        if cards then __nqs_mundane_bus.emit({ kind = "mundane_ready", cards = cards }) end
+        return
+    end
+    __nqs_mundane_bus.whenLoaded(objs, before, function(guids, timeout)
+        __nqs_mundane_bus.emit({ kind = "models_refreshed", guids = guids, timeout = timeout or nil })
+        if cards then __nqs_mundane_bus.emit({ kind = "mundane_ready", cards = cards, timeout = timeout or nil }) end
+    end)
+end
+
 local IMPORTER_NAME = "Mundane Importer"
 local VERSION       = "?"   -- the running version, handed over by the updater block
 
@@ -1669,6 +1712,7 @@ local function runImport(rawText, player)
     importCount = importCount + 1
     local batch = string.format("%s-%d-%d", self.getGUID(), os.time(), importCount)
     local applied, notFound, used, bases = 0, {}, {}, {}
+    local busObjs, busStamps = {}, {}           -- NQS fork (S2): the models scripted, for models_refreshed
     local tag = gangTag(gang)
     if tag then lastGang = tag end
 
@@ -1697,6 +1741,8 @@ local function runImport(rawText, player)
             -- a card raised or lowered by hand on this model stays so
             local okL, lift = callIfHas(obj, "getLift")
             cf.lift = okL and tonumber(lift) or nil
+            busStamps[#busObjs + 1] = __nqs_mundane_bus.stampOf(obj)
+            busObjs[#busObjs + 1] = obj
             installCard(obj, cardScriptFor(cf, batch .. "-" .. fi))
             obj.highlightOn({ 0, 1, 0 }, 0.8)
             applied = applied + 1
@@ -1718,6 +1764,7 @@ local function runImport(rawText, player)
                    { 0.6, 0.85, 1 })
         for _, n in ipairs(bases) do printToAll(IMPORT_PREFIX .. "    * " .. n, { 0.8, 0.92, 1 }) end
     end
+    __nqs_mundane_bus.refreshed(busObjs, busStamps, applied)   -- NQS fork (S2): once they have loaded
     return applied, notFound
 end
 
@@ -2192,6 +2239,7 @@ end
 local CURRENT = {}
 function upgradeCards()
     local out = {}
+    local busObjs, busStamps = {}, {}             -- NQS fork (S2): the models re-scripted
     for _, obj in ipairs(getAllObjects()) do
         if IMPORT_TAG ~= "" and obj.hasTag(IMPORT_TAG) then
             local guid = obj.getGUID()
@@ -2206,6 +2254,8 @@ function upgradeCards()
                 script = ok and tostring(script or "") or ""
                 if script:find("@@MUNDA_IMPORT@@", 1, true) then
                     if not cardIsCurrent(script) then
+                        busStamps[#busObjs + 1] = __nqs_mundane_bus.stampOf(obj)
+                        busObjs[#busObjs + 1] = obj
                         upgradeCard(obj, script)
                         out[#out + 1] = guid
                     elseif script:find("MUNDA_STAMP", 1, true) then
@@ -2216,6 +2266,7 @@ function upgradeCards()
             end
         end
     end
+    __nqs_mundane_bus.refreshed(busObjs, busStamps)   -- NQS fork (S2): models_refreshed, once they have loaded
     return out
 end
 
@@ -22326,7 +22377,8 @@ function __nqs_mundane_bus.send(ev)
     if ev.fighter == nil and fighter then ev.fighter = fighter.name end
     ev.by = __nqs_mundane_bus.who(c.by or ev.by)
     ev.player = nil
-    if ev.kind == "state_change" and c.STATE[ev.field or ""] and ev.attack_id == nil and ev.cause == nil then
+    if ev.kind == "state_change" and c.STATE[ev.field or ""] and ev.attack_id == nil and ev.cause == nil
+       and not ev.replay then
         if c.attack and os.time() - (c.attackAt or 0) <= (tonumber(CFG.seqStale) or 120) then
             ev.attack_id = c.attack
         elseif c.cause then ev.cause = c.cause end
@@ -22391,6 +22443,51 @@ function __nqs_mundane_bus.action(player, key, params, target, free)
     if free == nil and a and not params then free = SKILL.cost(a) == 0 or nil end
     __nqs_mundane_bus.send({ kind = "action", action = a and a.label and tostring(a.label) or tostring(key),
         key = tostring(key), target = target, params = params, free = free, by = player })
+end
+
+-- NQS fork (S2, "Readiness, refresh and a snapshot"): the card's state as
+-- it is now, republished with `replay = true`, changing nothing -- status,
+-- wounds, Out of Action, conditions, readiness and actions left, each
+-- weapon profile's state and the wargear burnt out or used up -- so a
+-- record started mid-game has every fighter's state. The recorder calls
+-- it when it calls the Controller's (a new record). Returns how many
+-- events it published.
+function publishState()
+    local n = 0
+    local function put(ev)
+        ev.kind, ev.replay = "state_change", true
+        ev.action = ev.action or ev.field
+        __nqs_mundane_bus.send(ev)
+        n = n + 1
+    end
+    put({ field = "status", to = fighter.status })
+    put({ field = "hp", to = tonumber(fighter.wounds.current) or 0, max = tonumber(fighter.wounds.max) })
+    put({ field = "out_of_action", to = fighter.outOfAction == true, out_cold = fighter.outCold or nil })
+    for key, k in pairs(fighter.conditions or {}) do
+        local i = indexOf(CONDITIONS, key)
+        put({ field = "condition", key = tostring(key), to = tonumber(k) or 1,
+              label = i and CONDITIONS[i].label or nil })
+    end
+    put({ field = "readiness", to = fighter.activation or "activated", grouped = fighter.grouped and true or nil,
+          ready_marks = tonumber(fighter.readyMarks) })
+    put({ field = "actions_left", to = tonumber(fighter.actionsLeft) or 0, activation = fighter.activation })
+    for i = 1, 10 do
+        local w = weaponAt(i)
+        for k, p in ipairs(w and type(w.profiles) == "table" and w.profiles or {}) do
+            if p.ammo or p.reliableUsed then
+                put({ field = "weapon", weapon = tostring(TRAIT_RULES.name(w) or w.name or i),
+                      profile = p.name and tostring(p.name) or k, to = p.ammo or "fine",
+                      reliable_used = p.reliableUsed and true or nil })
+            end
+        end
+    end
+    for key, on in pairs(fighter.burnt or {}) do
+        if on then put({ field = "item", item = tostring(key), to = "burnt" }) end
+    end
+    for key, on in pairs(fighter.usedOnce or {}) do
+        if on then put({ field = "item", item = tostring(key), to = "used" }) end
+    end
+    return n
 end
 
 -- An attack's id, the same on every card it reaches: the attacking card's
