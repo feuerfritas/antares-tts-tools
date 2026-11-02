@@ -3445,13 +3445,17 @@ end
 -- dice have settled and been read -- never from DICE.start. The physical dice
 -- keep their `gang-roster-roll` tag (DICE.spawn): this event is the record,
 -- the tag stops the recorder counting the dice a second time.
--- Priority: each side rolls its own single D6 under its own panel. A lone D6
--- from one side is held DICE.PAIR seconds for the other's; when it comes
--- (same round) the two are one `Priority` roll with both faces and the
--- winner; when it does not, the held D6 goes out as the plain `D6` roll it
--- was. A tie names no winner (the sides roll again).
-DICE.PAIR = 20          -- seconds a side's lone D6 waits for the other side's Priority D6
-DICE.pend = {}          -- side (1 / 2) -> its held D6 { face, color, t, round, digital }
+-- Priority (operator, 2026-11-02, no timers): the first D6 from each side
+-- after a round change is the Priority roll. State: DICE.armed (a round
+-- change has come and the pair is not yet complete) and DICE.held (the first
+-- side's D6, or nil). The held D6 waits for the other side's, never for a
+-- clock; it goes out as a plain `D6` roll when anything else ends the
+-- pairing (same side again, another rail roll, the next round change). A tie
+-- publishes Priority with outcome {tie = true} and stays armed (re-roll).
+-- `outcome` is always a JSON object: TTS encodes an empty table as [], so it
+-- always carries a key (or is left out).
+DICE.armed = false      -- a round change has come and the Priority pair is not complete
+DICE.held = nil         -- the first D6 of the pair { lane, face, color, t, digital }
 DICE.KINDS = { d6 = { "D6", "D6" }, firepower = { "Firepower", "FIREPOWER" }, injury = { "Injury", "INJURY" } }
 
 -- Publishes `event` stamped with the time `t` the dice settled at (emit would
@@ -3469,35 +3473,44 @@ function DICE.busPlain(p)
         dice = __nqs_mundane_bus.diceArray({ p.face }, "D6"), digital = p.digital or nil, player = p.color }, p.t)
 end
 
+-- Ends the pairing: the held D6, if any, goes out as the plain roll it is.
+-- `rearm` is true at a forward round change (the next D6s are a Priority pair).
+function DICE.pairEnd(rearm)
+    local p = DICE.held
+    DICE.held = nil
+    DICE.armed = rearm and true or false
+    if p then DICE.busPlain(p) end
+end
+
 function DICE.bus(req, list, digital)
     local t = Time.time
     if #list == 1 and list[1].kind == "d6" and LAYOUT.SIDES[req.lane] then
-        local me = { lane = req.lane, face = list[1].face, color = req.color, t = t, round = turn, digital = digital }
-        local other = DICE.pend[3 - req.lane]
-        if other and other.round == turn and t - other.t <= DICE.PAIR then
-            other.dead, DICE.pend[3 - req.lane] = true, nil
-            local a, b = (req.lane == 1) and me or other, (req.lane == 1) and other or me
-            local win = a.face ~= b.face and (a.face > b.face and 1 or 2) or nil
-            DICE.busSend({ kind = "roll", label = "Priority",
-                dice = __nqs_mundane_bus.diceArray({ a.face, b.face }, "D6"),
-                sides = { SETUP.side(1), SETUP.side(2) },
-                priority = win and { side = win, gang = SETUP.side(win) } or nil,
-                outcome = { tie = (win == nil) or nil },
-                digital = (a.digital or b.digital) and true or nil,
-                player = req.color }, t)
+        local me = { lane = req.lane, face = list[1].face, color = req.color, t = t, digital = digital }
+        local other = DICE.held
+        if not DICE.armed then
+            DICE.busPlain(me)                           -- before a round change, or after the pair: a plain D6
             return
         end
-        local old = DICE.pend[req.lane]
-        if old and not old.dead then old.dead = true; DICE.busPlain(old) end
-        DICE.pend[req.lane] = me
-        Wait.time(function()
-            if me.dead then return end
-            me.dead = true
-            if DICE.pend[me.lane] == me then DICE.pend[me.lane] = nil end
+        if not other then DICE.held = me; return end    -- the first of the pair: held
+        if other.lane == me.lane then                   -- the same side again: the pairing is over
+            DICE.pairEnd(false)
             DICE.busPlain(me)
-        end, DICE.PAIR)
+            return
+        end
+        DICE.held = nil
+        local a, b = (me.lane == 1) and me or other, (me.lane == 1) and other or me
+        local win = a.face ~= b.face and (a.face > b.face and 1 or 2) or nil
+        DICE.armed = (win == nil)                       -- a tie: the next pair is Priority again
+        DICE.busSend({ kind = "roll", label = "Priority",
+            dice = __nqs_mundane_bus.diceArray({ a.face, b.face }, "D6"),
+            sides = { SETUP.side(1), SETUP.side(2) },
+            priority = win and { side = win, gang = SETUP.side(win) } or nil,
+            outcome = win and { winner = win } or { tie = true },
+            digital = (a.digital or b.digital) and true or nil,
+            player = req.color }, t)
         return
     end
+    DICE.pairEnd(false)                                 -- any other roll ends the pairing
     -- anything else: one plain roll per kind of die in it, in the order thrown
     for _, kind in ipairs({ "d6", "firepower", "injury" }) do
         local faces, best = {}, nil
@@ -3858,6 +3871,7 @@ function onAdvanceTurn(player, value, id)
         turn = math.max(0, turn - 1)
         drawTurn()
         if was == 1 then DEPLOY.again() end               -- back to the setup: the deployment's model too
+        DICE.pairEnd(false)                               -- NQS fork: a step back is a correction; no Priority pair follows
         if turn ~= was then SETUP.busRound(was, player and player.color or nil) end   -- NQS fork: see SETUP.busRound
         return
     end
@@ -3880,6 +3894,7 @@ function onAdvanceTurn(player, value, id)
     -- cards' own actions_left events land first. Start Game (round 0 -> 1)
     -- also says the game has started, first (game-recorder !19).
     if turn == 1 then SETUP.busStart(player and player.color or nil) end
+    DICE.pairEnd(true)      -- NQS fork: a held D6 goes out plain; the next D6 from each side is the Priority roll
     __nqs_mundane_bus.emit({
         kind = "state_change", action = "ready_all", field = "ready_all",
         round = turn, n = n,
