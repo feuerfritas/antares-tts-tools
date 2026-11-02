@@ -3432,7 +3432,96 @@ function DICE.deliver(req, list)
             callIfHas(o, "onDiceThrown", { token = req.token, faces = faces, digital = digital })
         end
     end
-    if req.own then DICE.say(req, list, digital) end
+    if req.own then
+        DICE.say(req, list, digital)
+        DICE.bus(req, list, digital)    -- NQS fork: the recorder's copy of the roll just said (below)
+    end
+end
+
+-- ── NQS fork: the rail buttons' rolls on the recorder's bus ──────────────
+-- Agreed in the S2 contract (antares-tts-tools SPEC, "The Controller"): the
+-- Roll Dice / Roll Firepower / Roll Injuries buttons publish what they say
+-- in chat. Called from DICE.deliver, i.e. from DICE.finish, so only once the
+-- dice have settled and been read -- never from DICE.start. The physical dice
+-- keep their `gang-roster-roll` tag (DICE.spawn): this event is the record,
+-- the tag stops the recorder counting the dice a second time.
+-- Priority: each side rolls its own single D6 under its own panel. A lone D6
+-- from one side is held DICE.PAIR seconds for the other's; when it comes
+-- (same round) the two are one `Priority` roll with both faces and the
+-- winner; when it does not, the held D6 goes out as the plain `D6` roll it
+-- was. A tie names no winner (the sides roll again).
+DICE.PAIR = 20          -- seconds a side's lone D6 waits for the other side's Priority D6
+DICE.pend = {}          -- side (1 / 2) -> its held D6 { face, color, t, round, digital }
+DICE.KINDS = { d6 = { "D6", "D6" }, firepower = { "Firepower", "FIREPOWER" }, injury = { "Injury", "INJURY" } }
+
+-- Publishes `event` stamped with the time `t` the dice settled at (emit would
+-- stamp now, and a held D6 goes out late).
+function DICE.busSend(event, t)
+    event.seq = __nqs_mundane_bus.nextSeq()
+    event.t = t
+    __nqs_mundane_bus.publish(JSON.encode(event))
+end
+
+-- A held lone D6 as the plain roll it is.
+function DICE.busPlain(p)
+    local gang = LAYOUT.SIDES[p.lane] and SETUP.side(p.lane) or nil
+    DICE.busSend({ kind = "roll", label = "D6", gang = gang, side = p.lane,
+        dice = __nqs_mundane_bus.diceArray({ p.face }, "D6"), digital = p.digital or nil, player = p.color }, p.t)
+end
+
+function DICE.bus(req, list, digital)
+    local t = Time.time
+    if #list == 1 and list[1].kind == "d6" and LAYOUT.SIDES[req.lane] then
+        local me = { lane = req.lane, face = list[1].face, color = req.color, t = t, round = turn, digital = digital }
+        local other = DICE.pend[3 - req.lane]
+        if other and other.round == turn and t - other.t <= DICE.PAIR then
+            other.dead, DICE.pend[3 - req.lane] = true, nil
+            local a, b = (req.lane == 1) and me or other, (req.lane == 1) and other or me
+            local win = a.face ~= b.face and (a.face > b.face and 1 or 2) or nil
+            DICE.busSend({ kind = "roll", label = "Priority",
+                dice = __nqs_mundane_bus.diceArray({ a.face, b.face }, "D6"),
+                sides = { SETUP.side(1), SETUP.side(2) },
+                priority = win and { side = win, gang = SETUP.side(win) } or nil,
+                outcome = { tie = (win == nil) or nil },
+                digital = (a.digital or b.digital) and true or nil,
+                player = req.color }, t)
+            return
+        end
+        local old = DICE.pend[req.lane]
+        if old and not old.dead then old.dead = true; DICE.busPlain(old) end
+        DICE.pend[req.lane] = me
+        Wait.time(function()
+            if me.dead then return end
+            me.dead = true
+            if DICE.pend[me.lane] == me then DICE.pend[me.lane] = nil end
+            DICE.busPlain(me)
+        end, DICE.PAIR)
+        return
+    end
+    -- anything else: one plain roll per kind of die in it, in the order thrown
+    for _, kind in ipairs({ "d6", "firepower", "injury" }) do
+        local faces, best = {}, nil
+        for _, d in ipairs(list) do if d.kind == kind then faces[#faces + 1] = d.face end end
+        if #faces > 0 then
+            local outcome
+            if kind == "firepower" then
+                local hits, ammo = 0, false
+                for _, f in ipairs(faces) do
+                    local c = DICE.CHART.firepower[f] or DICE.CHART.firepower[1]
+                    hits, ammo = hits + c.hits, ammo or c.ammo == true
+                end
+                outcome = { hits = hits, ammo_checks = ammo or nil }
+            elseif kind == "injury" then
+                local results = {}
+                for i, f in ipairs(faces) do results[i] = DICE.CHART.injury[f] or "serious" end
+                outcome = { results = results }
+            end
+            DICE.busSend({ kind = "roll", label = DICE.KINDS[kind][1],
+                gang = LAYOUT.SIDES[req.lane] and SETUP.side(req.lane) or nil, side = req.lane,
+                dice = __nqs_mundane_bus.diceArray(faces, DICE.KINDS[kind][2]), outcome = outcome,
+                digital = digital or nil, player = req.color }, t)
+        end
+    end
 end
 
 -- This object's own rolls said on everyone's screen (and in chat).
@@ -3598,6 +3687,9 @@ function onFighterOut(t)
         if BOTTLE.key(vpNames[n]) == key then shown = true; BOTTLE.draw(n) end
     end
     if not due then return end
+    -- NQS fork: the gang now owes a Bottle Check (S2 contract, "The Controller")
+    __nqs_mundane_bus.emit({ kind = "state_change", field = "bottle_due", gang = gang, from = false, to = true,
+        cause = { action = "fighter_out", fighter = tostring(t.name or "") } })
     printToAll(string.format("[%s] %s is Out of Action: %s must take a Bottle Check this round.%s", gang,
         tostring(t.name or "A fighter"), gang,
         shown and "" or " Put one of its models on the table in front of a side panel of the Mundane Controller."), { 1, 0.55, 0.2 })
@@ -3624,6 +3716,9 @@ function onBottleHead(player, value, id)
     end
     printToAll(string.format("%sBottle Check for %s %s (set by hand)", CHAT_PREFIX, vpNames[n],
         on and "to take this round" or "no longer to take"), { 1, 0.55, 0.2 })
+    -- NQS fork: the reminder switched by hand, on the recorder's bus
+    __nqs_mundane_bus.emit({ kind = "state_change", field = "bottle_due", gang = trim(tostring(vpNames[n])), side = n,
+        from = not on, to = on, why = "by hand", player = player and player.color or nil })
     return on
 end
 
@@ -3634,6 +3729,11 @@ function onBottleValue(player, value, id)
     local v = BOTTLE.value(n) or 7
     BOTTLE.hand[n] = math.max(2, math.min(12, v + (tostring(value) == "-2" and -1 or 1)))
     BOTTLE.draw(n)
+    -- NQS fork: Ld edited by hand, on the recorder's bus (nothing when clamped at 2 / 12)
+    if BOTTLE.hand[n] ~= v then
+        __nqs_mundane_bus.emit({ kind = "state_change", field = "leadership", gang = SETUP.side(n), side = n,
+            from = v, to = BOTTLE.hand[n], why = "by hand", player = player and player.color or nil })
+    end
 end
 
 -- The die: the Bottle Check rolled, 2D6 at or under the Ld shown -- a
