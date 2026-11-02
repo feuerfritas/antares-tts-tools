@@ -22248,7 +22248,9 @@ function ACTIVATION.coupEnd(duel, foe)
             target_strength = foeS, reroll = r.rerolled, reroll_why = r.rerolled and "Cut-Throat" or nil,
             outcome = { passed = r.out, total = r.total, foe_total = theirs, out_of_action = r.out,
                         cut_throat = reroll or nil },
-            by = duel.color or player,
+            -- the clicker as ACTIVATION.coup stored it: its Player, or a
+            -- script's stand-in (whose `by` names it), else the dice's colour
+            by = duel.player or duel.color,
         })
     end)
     if r.out then
