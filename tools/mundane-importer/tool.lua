@@ -22495,7 +22495,13 @@ __nqs_mundane_bus.card.ATTACKS = { fight = true, shoot = true, braced_shot = tru
 function __nqs_mundane_bus.action(player, key, params, target, free)
     local a = ACTIONS[indexOf(ACTIONS, key) or 0] or SKILL.action(key)
     if not params and __nqs_mundane_bus.card.ATTACKS[tostring(key)] then return end
-    local aims = a and ACTIVATION.aimsAt(a)
+    -- The fighters aimed at are picked only for an action that is aimed
+    -- (ACTIVATION.aimsAt) and whose caller did not name them (an attack's
+    -- declaration has): picking asks every selected model's card
+    -- isOutOfAction (and engageInfo), through ACTIVATION.ask -- protected,
+    -- and only of a card whose script has the function (ACTIVATION.has), so
+    -- an older card is skipped rather than put an error in chat.
+    local aims = a and not params and ACTIVATION.aimsAt(a)
     if target == nil and aims then
         local names = {}
         for i, e in ipairs(ACTIVATION.targets(player, true, a.heal ~= nil)) do names[i] = tostring(e.name) end
