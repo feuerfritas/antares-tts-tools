@@ -15931,45 +15931,26 @@ function ACTIVATION.rollTest(key, player, o)
         ACTIVATION.showDice{ title = test.natural and "Perils of the Warp!" or title, kind = "d6", faces = faces,
                              hl = ACTIVATION.checkInk(test), sum = not test.target and ("∑" .. total) or nil }
         onStatRoll(player, test)
-        -- MI4b-3 stat-test / stat-roll bus publish. Reached for every
-        -- `<Stat> Check` (2D6 lte for Ld/Cl/Wil/Int, 1D6 lte for S/T/I)
-        -- and every stat-only roll (M, A -- no target, no pass/fail).
-        -- Shape maps to gang-roster's `action = "<Stat> check"` for the
-        -- `test.under == true` branch (lte checks) and `"<Stat> roll"`
-        -- for the stat-only branch. `natural` captures the 2 / 12 edge
-        -- cases for the Perils of the Warp casting rules. `why` passes
-        -- `o.why` through so the recorder sees "Fearsome", "Nerve",
-        -- "Spring Up" etc as the reason this check was made.
+        -- NQS fork: the test on the bus (MI4b-3; S2: through the one test
+        -- publisher, labelled "Cool check" / "Movement roll", `why` the
+        -- rule that called for it -- "Fearsome", "Nerve", "Unstoppable").
         do
-            local __stat_names = { Cl = "Cool", Ld = "Leadership", Wil = "Willpower",
-                                   Int = "Intelligence", S = "Strength", T = "Toughness",
-                                   I = "Initiative", Sv = "Save", Inv = "Invulnerable save" }
-            local __action
-            if test.target == nil then
-                __action = (__stat_names[key] or key) .. " roll"
-            else
-                __action = (__stat_names[key] or key) .. " check"
-            end
-            local __outcome
-            if test.target ~= nil then
-                __outcome = { passed = test.passed and true or false, total = test.total }
-                if test.natural then __outcome.natural = test.natural end
-            else
-                __outcome = { total = test.total }
-            end
-            __nqs_mundane_bus.send({
-                kind = "roll", action = __action,
-                fighter = fighter and fighter.name or nil,
-                dice = __nqs_mundane_bus.diceArray(faces, "D6"),
+            local names = { Cl = "Cool", Ld = "Leadership", Wil = "Willpower", Int = "Intelligence",
+                            S = "Strength", T = "Toughness", I = "Initiative", Sv = "Save",
+                            Inv = "Invulnerable save", M = "Movement", A = "Attacks" }
+            local out = { total = test.total }
+            if test.target ~= nil then out.passed, out.natural = test.passed and true or false, test.natural end
+            test.busLabel = (names[key] or key) .. (test.target == nil and " roll" or " check")
+            __nqs_mundane_bus.test(test.busLabel, faces, "D6", {
                 direction = test.target and (test.under and "lte" or "gte") or nil,
-                stat = key,
-                target = test.target,
-                outcome = __outcome,
-                why = o.why or nil,
-                by = color or player,
+                stat = key, target = test.target, modifiers = roll and o.mods and #o.mods > 0 and o.mods or nil,
+                outcome = out, why = o.why, by = color or player,
             })
         end
-        if o.done then o.done(test, ACTIVATION.roll) end
+        if o.done then
+            local shown = ACTIVATION.roll
+            __nqs_mundane_bus.within("cause", { roll = test.busLabel }, function() o.done(test, shown) end)
+        end
     end, "d6", title)
     return test
 end
@@ -17008,7 +16989,7 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             if template then crit = false end         -- a Template's hits come of no hit die (its Unstable die neither)
             __nqs_mundane_bus.hitRoll(attack, faces, {
                 passed = (res.hit or (res.hits or 0) > 0) and true or false, hits = res.hits or 0,
-                shock = res.shock, knockback = kb or nil, crit = crit or nil,
+                shock = res.shock, knockback = kb and (tonumber(CFG.knockback) or 1) or nil, crit = crit or nil,
                 unstable = res.unstable and true or nil, precision = res.precise,
                 ammo = res.ammo, spared = res.spared or nil, state = res.state,
             }, res.target, res.targets, player)
@@ -17189,6 +17170,7 @@ function ACTIVATION.blast(attack, shot, player)
             local f = faces[1] or 1
             local misfire = shot.face == 1 and f == 1
             local ink = misfire and COL.valueMod or COL.value
+            shot.scatter = { f = f, misfire = misfire or nil }   -- NQS fork (S2): published at blastGo
             local roll = { title = title, kind = "d6", faces = { f }, sum = f .. '"', sumInk = ink }
             ACTIVATION.showDice(roll)
             ACTIVATION.sayAttack("SCATTER", shot.what, string.format('%d"%s', f,
@@ -17231,6 +17213,11 @@ function ACTIVATION.blastKnock(attack, list, player)
             local ok = f >= n
             hls[i], read[i], kinds[i] = ok and UP or MOD, string.format("%s %d", a.name, f), "d6"
             if ok then knocked[#knocked + 1] = a end
+            local id = __nqs_mundane_bus.attackId(attack.seq)   -- NQS fork (S2): each fighter's Knockback roll
+            __nqs_mundane_bus.test("Knockback", { f }, "D6", { direction = "gte", target = n,
+                weapon = attack.name and tostring(attack.name) or nil, target_fighter = a.name,
+                outcome = { passed = ok, knockback = ok and (tonumber(CFG.knockback) or 1) or nil },
+                attack_id = id, group = id, by = player })
         end
         ACTIVATION.sayAttack("KNOCKBACK ROLLS", attack.name, table.concat(read, ", ") .. " = "
             .. (#knocked > 0 and ACTIVATION.nameList(knocked) .. " knocked back" or "nobody knocked back"),
@@ -17269,6 +17256,14 @@ function ACTIVATION.drag(attack, aim, player)
                        sum = ok and inches .. '"' or "-", sumInk = ok and UP or MOD }
         if not ok then roll.kinds, roll.faces = { "d6" }, { f } end
         ACTIVATION.showDice(roll)
+        do                                           -- NQS fork (S2): the Drag on the bus, its inches
+            local id = __nqs_mundane_bus.attackId(attack.seq)
+            local dice = { { type = "D6", value = f, face = tostring(f), as = "drag" },
+                           { type = "FIREPOWER", value = fp, face = tostring(fp), as = "inches" } }
+            __nqs_mundane_bus.test("Drag", nil, nil, { dice = dice, direction = "gte", target = s,
+                weapon = attack.name and tostring(attack.name) or nil, target_fighter = aim.name,
+                outcome = { passed = ok, inches = ok and inches or nil }, attack_id = id, group = id, by = player })
+        end
         if ok then
             local t = ACTIVATION.knockFrom(attack)
             t.inches = inches
@@ -17294,6 +17289,17 @@ function ACTIVATION.blastCount(n) return n == 1 and CFG.blastOne or string.forma
 function ACTIVATION.blastGo(attack, shot, player)
     local list = {}
     for k, a in ipairs(ACTIVATION.blastTargets(player)) do list[k] = { aim = a, hits = 1 } end
+    -- NQS fork (S2, S1-j): a scattered Blast as a `scatter` event -- its
+    -- distance die and the fighters it caught; the players place the
+    -- template (its `to` is theirs, not the card's to know)
+    if shot.scatter then
+        local id, hit = __nqs_mundane_bus.attackId(attack.seq), {}
+        for k, x in ipairs(list) do hit[k] = tostring(x.aim.name) end
+        __nqs_mundane_bus.send({ kind = "scatter", weapon = attack.name and tostring(attack.name) or nil,
+            dice = { { type = "D6", value = shot.scatter.f, face = tostring(shot.scatter.f), as = "distance" } },
+            distance = shot.scatter.f, misfire = shot.scatter.misfire, hit = #hit > 0 and hit or nil,
+            attack_id = id, group = id, by = player })
+    end
     if #list == 0 then ACTIVATION.sayAttack("BLAST", shot.what, "nobody selected -- nobody hit", COL.valueMod) end
     ACTIVATION.eachHit(attack, list, { label = "Blast", auto = shot.shock, rf = shot.rf }, player)
 end
@@ -17405,6 +17411,14 @@ function ACTIVATION.agilityFor(o, n, why, player, done)
             digital and " (rolled digitally)" or ""), rgbOf(fails == 0 and COL.valueUp or COL.valueMod))
         ACTIVATION.showDice{ title = title, kinds = kinds, faces = faces, hls = hls,
                              sum = fails == 0 and "Passed" or "∑" .. fails, sumInk = fails == 0 and COL.valueUp or COL.valueMod }
+        -- NQS fork (S2): the other fighter's test, rolled on this card
+        local okG, guid = pcall(function() return o.obj.getGUID() end)
+        __nqs_mundane_bus.test("Agility", faces, "D6", {
+            fighter = tostring(o.name), guid = okG and guid or nil, rolled_by = fighter.name,
+            direction = "gte", target = need, modifier = mod ~= 0 and mod or nil, why = tostring(why),
+            outcome = { passed = fails == 0, fails = fails }, reroll = rerolled and true or nil,
+            rerolled = rerolled, by = player,
+        })
         done(fails, ACTIVATION.roll)
     end
     ACTIVATION.rolling(title)
@@ -19089,6 +19103,7 @@ function ACTIVATION.reloadNow(list, player, o)
                         __nqs_mundane_bus.send({
                             kind = "roll",
                             action = __wname and ("ammo test, " .. tostring(__wname)) or "ammo test",
+                            label = "Ammo", why = "Scarce",
                             fighter = fighter and fighter.name or nil,
                             dice = __nqs_mundane_bus.diceArray({ f }, "D6"),
                             direction = "gte",
@@ -19291,8 +19306,21 @@ function rollRecovery(player)
         ACTIVATION.say("Recovery Test" .. (#why > 0 and (" (" .. table.concat(why, ", ") .. ")") or ""), {},
             ACTIVATION.injuryText(faces, best), { color = color, digital = digital })
         ACTIVATION.showDice{ title = "Recovery Test", kind = "injury", faces = faces, result = best }
-        if best == "out" then setOutOfAction(true)
-        elseif best == "injured" and fighter.status ~= "active" then setStatus("active") end
+        -- NQS fork (S2): the Recovery test, its dice composed and why, the die
+        -- kept (the best, the recovering fighter's player's pick: N26)
+        local pick = __nqs_mundane_bus.injuryPools(faces, nil, function(x) return ACTIVATION.INJURY_DICE[x] end, true)[1]
+        local dice = __nqs_mundane_bus.diceArray(faces, "INJURY")
+        if pick and dice[pick.used] then dice[pick.used].used = true end
+        __nqs_mundane_bus.test("Recovery", faces, "INJURY", {
+            dice = dice, sources = #why > 0 and why or nil, chooser = "auto",
+            composed = { dice = rec.dice, helper = rec.helper, kit = rec.kit, tend = rec.tend or nil,
+                         treated = rec.treated },
+            outcome = { result = best }, by = color or player,
+        })
+        __nqs_mundane_bus.within("cause", { roll = "Recovery" }, function()
+            if best == "out" then setOutOfAction(true)
+            elseif best == "injured" and fighter.status ~= "active" then setStatus("active") end
+        end)
         onRecoveryRolled(player, best, faces)
     end, "injury", "Recovery Test")
     return rec.dice
@@ -19665,7 +19693,7 @@ function rollNerve(player)
         -- Suppressed), and `auto` (the Outcast Leader's auto-pass).
         __nqs_mundane_bus.send({
             kind = "roll",
-            action = "Cool check",
+            action = "Cool check", label = "Cool check",   -- NQS fork (S2): every test has a label
             fighter = fighter and fighter.name or nil,
             dice = __nqs_mundane_bus.diceArray(faces, "D6"),
             direction = "lte",
@@ -19747,7 +19775,7 @@ function ACTIVATION.rollGroup(n, player)
         -- Activated.
         __nqs_mundane_bus.send({
             kind = "roll",
-            action = "Leadership check",
+            action = "Leadership check", label = "Leadership check",
             fighter = fighter and fighter.name or nil,
             dice = __nqs_mundane_bus.diceArray(faces, "D6"),
             direction = "lte",
@@ -20096,7 +20124,17 @@ function ACTIVATION.agility(o, player)
             first and string.format(", %s re-rolled %d", gang, first) or "", body,
             digital and " (rolled digitally)" or ""), rgbOf(ink))
         ACTIVATION.showDice{ title = first and title or firstTitle, kind = "d6", faces = { f }, hl = ink }
-        if o.done then o.done(test.passed, test, player) end
+        -- NQS fork (S2): the Agility test on the bus, its modifiers named
+        __nqs_mundane_bus.test("Agility", { f }, "D6", {
+            direction = "gte", target = need, modifier = mod ~= 0 and mod or nil,
+            modifiers = #by > 0 and by or nil, why = o.why, height = o.height,
+            outcome = { passed = test.passed and true or false, total = test.total,
+                        auto = (o.pass and test.total < need) and tostring(o.pass) or nil },
+            reroll = first ~= nil or nil, reroll_why = first and gang or nil, by = player,
+        })
+        __nqs_mundane_bus.within("cause", { roll = "Agility" }, function()
+            if o.done then o.done(test.passed, test, player) end
+        end)
         onAgilityRolled(player, test)
     end
     ACTIVATION.later(o.after, function()
@@ -20108,6 +20146,11 @@ function ACTIVATION.agility(o, player)
             if not ((how == "ones" and f == 1) or (how == "all" and f + mod < need)) then return read(f, digital) end
             chat(string.format("%s - Agility Test (%d+%s): %d -- re-rolled (%s)", fighter.name, need, why, f, gang),
                 rgbOf(COL.valueMod))
+            __nqs_mundane_bus.test("Agility", { f }, "D6", {     -- NQS fork (S2): the face the re-roll replaces
+                direction = "gte", target = need, modifier = mod ~= 0 and mod or nil,
+                modifiers = #by > 0 and by or nil, why = o.why, height = o.height,
+                outcome = { rerolled = tostring(gang) }, by = player,
+            })
             local held = { title = firstTitle, kind = "d6", faces = { f }, hl = COL.valueMod }
             ACTIVATION.showDice(held)
             ACTIVATION.later(held, function()
@@ -20428,6 +20471,8 @@ function ACTIVATION.insane(player, go)
         local f = faces[1] or 1
         ACTIVATION.showDice{ title = title, kind = "d6", faces = { f } }
         ACTIVATION.say(title, { tostring(f) }, f, { color = color, digital = digital })
+        -- NQS fork (S2): the card has no Insanity table; the face is the result
+        __nqs_mundane_bus.test("Insanity", { f }, "D6", { outcome = { result = f }, by = color or player })
         onInsanityRolled(player, { face = f, digital = digital })
         ACTIVATION.later(ACTIVATION.roll, go)
     end, "d6", title)
@@ -20478,6 +20523,9 @@ function ACTIVATION.comedown(player, go)
                 bad1.n = bad1.n + math.max(1, math.floor(tonumber(a.reaction.wounds) or 1))
             end
             onBoostEnded(player, { key = a.key, label = a.label, face = f, bad = bad, wounds = wounds, digital = digital })
+            __nqs_mundane_bus.test(tostring(a.label), { f }, "D6", { why = "comedown", direction = "gte",   -- NQS fork (S2)
+                target = limit(a) + 1, outcome = { passed = not bad, bad = bad or nil, wounds = wounds },
+                by = player })
         end
         ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hls = hls }
         if bad1 and not fighter.outOfAction then
@@ -20485,8 +20533,10 @@ function ACTIVATION.comedown(player, go)
             -- at 0 wounds as for any wound (ACTIVATION.damage)
             local failed = {}
             for k = 1, bad1.n do failed[k] = { dmg = 1, l = 1 } end
-            return ACTIVATION.damage({ by = fighter.name, weapon = bad1.label, dodged = true, after = go },
-                failed, ACTIVATION.roll, player)
+            return __nqs_mundane_bus.within("cause", { roll = tostring(bad1.label) }, function()   -- NQS fork (S2)
+                return ACTIVATION.damage({ by = fighter.name, weapon = bad1.label, dodged = true, after = go },
+                    failed, ACTIVATION.roll, player)
+            end)
         end
         ACTIVATION.later(ACTIVATION.roll, go)
     end, "d6", title)
@@ -21677,8 +21727,10 @@ function ACTIVATION.fall(player)
     if not (n and n.test == "height") or fighter.outOfAction then return nil end
     closeNerve()
     local height = n.value
-    ACTIVATION.agility({ why = "Falling Down", pass = n.wings, done = function(passed, test, who)
-        ACTIVATION.land(height, passed, test, who or player)
+    ACTIVATION.agility({ why = "Falling Down", pass = n.wings, height = height, done = function(passed, test, who)
+        __nqs_mundane_bus.within("cause", { action = "Falling Down" }, function()   -- NQS fork (S2)
+            ACTIVATION.land(height, passed, test, who or player)
+        end)
     end }, player)
     return height
 end
@@ -21749,13 +21801,20 @@ function ACTIVATION.fallInjury(catfall, player)
         local R = ACTIVATION.INJURY[k]
         ACTIVATION.say("Falling Down (Injury dice)", {}, R.short, { color = color, digital = digital })
         ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = k }
-        if fighter.outOfAction then return end
-        if k == "out" then
-            setOutOfAction({ value = true, why = "injured by the fall" })
-            return
-        end
-        if k == "serious" and fighter.status ~= "seriously_injured" then setStatus("seriously_injured") end
-        ACTIVATION.fallEnd(catfall, player)
+        -- NQS fork (S2): the fall's Injury dice (#51), and what it does
+        local dice = __nqs_mundane_bus.diceArray(faces, "INJURY")
+        if dice[1] then dice[1].used = true end
+        __nqs_mundane_bus.test("Injury", faces, "INJURY", { dice = dice, why = "Falling Down", chooser = "auto",
+            outcome = { result = k }, by = color or player })
+        __nqs_mundane_bus.within("cause", { action = "Falling Down" }, function()
+            if fighter.outOfAction then return end
+            if k == "out" then
+                setOutOfAction({ value = true, why = "injured by the fall" })
+                return
+            end
+            if k == "serious" and fighter.status ~= "seriously_injured" then setStatus("seriously_injured") end
+            ACTIVATION.fallEnd(catfall, player)
+        end)
     end, "injury", title)
 end
 
@@ -21893,7 +21952,11 @@ function ACTIVATION.escape(a, player)
                              sum = cold and "Out Cold" or "Out of Action", sumInk = ink }
         chat(string.format("%s - %s: %d (%d+)%s", fighter.name, a.label, face, need,
             digital and " (rolled digitally)" or ""), rgbOf(ink))
-        setOutOfAction{ value = true, why = a.label, cold = cold }
+        __nqs_mundane_bus.test(tostring(a.label), { face }, "D6", { direction = "gte", target = need,   -- NQS fork (S2)
+            outcome = { passed = cold, result = cold and "out_cold" or "out_of_action" }, by = player })
+        __nqs_mundane_bus.within("cause", { roll = tostring(a.label) }, function()
+            setOutOfAction{ value = true, why = a.label, cold = cold }
+        end)
     end, "d6", title)
     return true
 end
@@ -21941,6 +22004,8 @@ function ACTIVATION.coup(player, again)
         if not aim then
             announce(string.format("%s - Coup de Grace: %s%s", fighter.name, own,
                 digital and " (rolled digitally)" or ""), color)
+            __nqs_mundane_bus.test("Coup de Grâce", { f }, "D6", { strength = s, modifier = mod ~= 0 and mod or nil,   -- NQS fork (S2)
+                outcome = { total = mine }, by = color or player })
             ACTIVATION.showDice(roll)
             onCoupRolled(player, r)
         elseif again then           -- Cut-Throat: against what the enemy has
@@ -22039,6 +22104,20 @@ function ACTIVATION.coupEnd(duel, foe)
         ff, foeS, theirs, r.out and "" or reroll and " -- rolled again with Cut-Throat"
         or string.format(" -- %s holds on", aim.name), (r.digital or foe.digital) and " (rolled digitally)" or ""),
         rgbOf(ink))
+    -- NQS fork (S2): the duel on the bus, both sides' faces -- before the
+    -- enemy's card says it goes Out of Action
+    do
+        local okG, guid = pcall(function() return aim.obj.getGUID() end)
+        local dice = __nqs_mundane_bus.diceArray({ r.face, ff }, "D6")
+        dice[1].as, dice[2].as = "attacker", "defender"
+        __nqs_mundane_bus.test("Coup de Grâce", nil, nil, {
+            dice = dice, strength = r.s, modifier = r.mod, target_fighter = aim.name, target_guid = okG and guid or nil,
+            target_strength = foeS, reroll = r.rerolled, reroll_why = r.rerolled and "Cut-Throat" or nil,
+            outcome = { passed = r.out, total = r.total, foe_total = theirs, out_of_action = r.out,
+                        cut_throat = reroll or nil },
+            by = duel.color or player,
+        })
+    end
     if r.out then
         ACTIVATION.ask(aim.obj, "setOutOfAction", { value = true, why = "Coup de Grace by " .. fighter.name })
     end
@@ -22218,6 +22297,26 @@ function __nqs_mundane_bus.send(ev)
     end
     __nqs_mundane_bus.emit(ev)
 end
+-- One publisher for every test the card rolls (S2, "Tests the card rolls
+-- without publishing"): `label` says what the test is ("Agility",
+-- "Recovery", "Willpower check"), `faces` its dice of kind `die` ("D6" by
+-- default, "INJURY"), and `ev` the rest -- why, target, direction, what
+-- the test adds (height, modifiers, ...), outcome (an object: given none,
+-- or an empty one, it gets the faces' `total`, so it never encodes as []).
+-- A test added later publishes by calling this.
+function __nqs_mundane_bus.test(label, faces, die, ev)
+    ev = ev or {}
+    ev.kind, ev.label = "roll", label
+    ev.action = ev.action or tostring(label):lower()
+    ev.dice = ev.dice or __nqs_mundane_bus.diceArray(faces or {}, die or "D6")
+    if type(ev.outcome) ~= "table" or next(ev.outcome) == nil then
+        local total = 0
+        for _, f in ipairs(faces or {}) do total = total + (tonumber(f) or 0) end
+        ev.outcome = { total = total }
+    end
+    __nqs_mundane_bus.send(ev)
+end
+
 -- An attack's id, the same on every card it reaches: the attacking card's
 -- GUID and its own count of attacks (ACTIVATION.attackHeader's token).
 -- `from` is the attacker's GUID (a target's card has it as t.from); nil
