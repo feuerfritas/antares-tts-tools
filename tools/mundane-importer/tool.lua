@@ -22399,10 +22399,11 @@ __nqs_mundane_bus.card = { setFighter = setFighter }
 -- whoever clicked or scripted it), and on an hp / status / condition /
 -- Out of Action change the `attack_id` of the attack under way on this
 -- card or the `cause` (a test's label, an action's name) -- then `emit`.
--- `player` (the gang owner's name) and `color` (the gang's) are left to
--- the recorder (game-recorder S1-l: it fills `player` from its fighter ->
--- gang -> owner map): the card knows neither which seat owns its gang nor
--- who sits there. A caller's `by` may be a Player, a seat colour or a
+-- `player` as S2 means it (the gang owner's name) and `color` (the
+-- gang's) are the recorder's to fill (game-recorder S1-l, from its fighter
+-- -> gang -> owner map): the card knows neither which seat owns its gang
+-- nor who sits there. Until S1-l does, `player` carries the clicking
+-- seat's colour, as it did before S2 (see send). A caller's `by` may be a Player, a seat colour or a
 -- name; it is published as a name.
 __nqs_mundane_bus.card.STATE = { hp = true, status = true, condition = true, out_of_action = true }
 -- Publishing must never stop the game (S2: the card plays exactly as it
@@ -22437,8 +22438,13 @@ end
 function __nqs_mundane_bus.send(ev)
     local c = __nqs_mundane_bus.card
     if ev.fighter == nil and fighter then ev.fighter = fighter.name end
-    ev.by = __nqs_mundane_bus.who(c.by or ev.by)
-    ev.player = nil
+    local clicker = c.by or ev.by
+    ev.by = __nqs_mundane_bus.who(clicker)
+    -- `player` stays what the card published before S2 -- the clicking seat
+    -- colour (a stand-in's `color`, if it names one), left out when there
+    -- is none -- since consumers read it today. Once game-recorder's S1-l
+    -- fills `player` with the gang owner's name, this line goes.
+    if ev.player == nil then ev.player = colorOf(clicker) end
     if ev.kind == "state_change" and c.STATE[ev.field or ""] and ev.attack_id == nil and ev.cause == nil
        and not ev.replay then
         if c.attack and os.time() - (c.attackAt or 0) <= (tonumber(CFG.seqStale) or 120) then
