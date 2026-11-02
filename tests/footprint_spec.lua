@@ -199,7 +199,7 @@ do
     local events = {}
     local env = { __nqs_mundane_bus = { card = {}, emit = function(e) events[#events + 1] = e end },
                   MODEL = MODEL, fighter = { name = "Orrom" }, string = string, tostring = tostring,
-                  tonumber = tonumber, type = type }
+                  tonumber = tonumber, type = type, ACTIVATION = {} }
     assert(load(fnSrc, "baseChanged", "t", env))()
     local bc = env.__nqs_mundane_bus.baseChanged
     bc(MODEL.baseRecord(50, "measured"))
@@ -212,6 +212,41 @@ do
     bc(MODEL.baseRecord(52, "manual", nil, nil, nil, 90, "z")); check(#events == 2, "a turned axis is a change")
     env.__nqs_mundane_bus.card.baseSig = nil
     bc(MODEL.baseRecord(32)); check(#events == 2, "a new fighter reseeds")
+end
+
+-- ── the outline ───────────────────────────────────────────
+do
+    local olSrc = assert(src:match("(local OUTLINE_COLOR.-\n    end)\n\n    %-%- A model's gang"), "drawOutline not found")
+    local lines = { { points = { { 0, 0, 0 }, { 1, 0, 0 } }, color = { 1, 0, 0 }, thickness = 0.04 },   -- another script's
+                    { points = { { 0, 0, 0 }, { 0, 0, 1 } }, color = { 1, 0.85, 0.3 }, thickness = 0.1 } }
+    local scale = { x = 2, y = 2, z = 0.5 }
+    local self_ = { getVectorLines = function() return lines end, setVectorLines = function(l) lines = l end,
+                    getScale = function() return scale end }
+    local env = { ACTIVATION = {}, CFG = { baseOutlines = false }, self = self_, pcall = pcall, ipairs = ipairs,
+                  type = type, tonumber = tonumber, math = math }
+    assert(load(olSrc .. "\nreturn nil", "outline", "t", env))
+    local chunk = assert(load("local currentBase\n" .. olSrc .. "\nreturn ACTIVATION.drawOutline", "outline", "t", env))
+    local draw = chunk()
+    local oval = MODEL.baseRecord(52, "description", nil, nil, nil, 90, "x")
+    draw(oval)
+    check(#lines == 2 and lines[1].color[1] == 1 and lines[2].thickness == 0.1, "off: other scripts' lines kept, none added")
+    env.CFG.baseOutlines = true
+    draw(oval)
+    check(#lines == 3, "on: one line added")
+    local mine = lines[3]
+    local maxx, maxz = 0, 0
+    for _, p in ipairs(mine.points) do maxx = math.max(maxx, math.abs(p[1])); maxz = math.max(maxz, math.abs(p[3])) end
+    near(maxx * 2, 90 / MM / 2, 1e-6, "local x half-size / scale (axis x, scale 2)")
+    near(maxz * 0.5, 52 / MM / 2, 1e-6, "local z half-size (scale 0.5)")
+    draw(MODEL.baseRecord(52, "description", nil, nil, nil, 90, "z"))
+    check(#lines == 3, "redraw replaces only its own line")
+    check(lines[1].color[1] == 1 and lines[2].thickness == 0.1, "foreign lines still there, in order")
+    maxx, maxz = 0, 0
+    for _, p in ipairs(lines[3].points) do maxx = math.max(maxx, math.abs(p[1])); maxz = math.max(maxz, math.abs(p[3])) end
+    near(maxz * 0.5, 90 / MM / 2, 1e-6, "axis z puts the length along local z")
+    env.CFG.baseOutlines = false
+    draw(oval)
+    check(#lines == 2, "off again removes only the ring")
 end
 
 if fails > 0 then print(fails .. " of " .. n .. " checks FAILED"); os.exit(1) end

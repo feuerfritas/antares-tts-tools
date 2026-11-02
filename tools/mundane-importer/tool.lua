@@ -4524,6 +4524,8 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 Activation in A's panel highlights every friend within
 --                 groupRange, on Distribute Ammo every friend within its
 --                 range.
+--   baseOutlines  true: each fighter's base is drawn on the model as a thin
+--                 ring (setVectorLines; the "Show base outlines" setting).
 --   agility       Agility test: one D6, passed on this or more;
 --   escherGang    House Escher's rules: they go to the fighters of a gang
 --                 of this `type` (the type as the roster names it under the
@@ -4636,6 +4638,7 @@ RULES.cfg = {
     nerveOutFoes  = false,
     groupRange    = 3,
     preMeasure    = false,
+    baseOutlines  = false,
     agility       = 4,
     escherGang    = { type = "House Escher", agility = "ones",
                       unless = { "Chaos Corrupted", "Genestealer Corrupted", "Genestealer Infected",
@@ -13453,6 +13456,46 @@ do
         -- NQS fork: a change of base is published (see __nqs_mundane_bus.baseChanged)
         __nqs_mundane_bus.baseChanged(base)
         return base
+    end
+
+    -- NQS fork (S3): the base drawn as a thin ring on the model with
+    -- setVectorLines, in the model's local space divided by its scale, so it
+    -- follows moves and turns (a rescale redraws at the next base change or
+    -- load). Only when the table has "Show base outlines" on (CFG.baseOutlines).
+    -- The card's own line is told apart by its exact colour and thickness;
+    -- every other line on the model (other scripts') is kept as it is.
+    local OUTLINE_COLOR, OUTLINE_THICK, OUTLINE_LIFT = { 1, 0.85, 0.3 }, 0.04, 0.05
+    function ACTIVATION.drawOutline(base)
+        base = base or currentBase()
+        local function ours(line)
+            local c = type(line) == "table" and line.color
+            local t = type(line) == "table" and tonumber(line.thickness)
+            if type(c) ~= "table" or not t then return false end
+            for i, key in ipairs({ "r", "g", "b" }) do
+                if math.abs((tonumber(c[i] or c[key]) or -1) - OUTLINE_COLOR[i]) > 0.002 then return false end
+            end
+            return math.abs(t - OUTLINE_THICK) < 0.0005
+        end
+        local okG, existing = pcall(function() return self.getVectorLines() end)
+        local lines = {}
+        for _, line in ipairs(okG and type(existing) == "table" and existing or {}) do
+            if not ours(line) then lines[#lines + 1] = line end
+        end
+        if CFG.baseOutlines and type(base) == "table" then
+            local okS, sc = pcall(function() return self.getScale() end)
+            local function axis(k, i) return math.max(0.01, math.abs(okS and sc and tonumber(sc[k] or sc[i]) or 1)) end
+            local sx, sy, sz = axis("x", 1), axis("y", 2), axis("z", 3)
+            local A, B = (tonumber(base.length) or base.diameter) / 2, (tonumber(base.width) or base.diameter) / 2
+            if base.axis ~= "x" then A, B = B, A end        -- A: the local x half-size, B: local z
+            local pts = {}
+            for k = 0, 48 do
+                local t = k * math.pi / 24
+                pts[#pts + 1] = { A * math.cos(t) / sx, OUTLINE_LIFT / sy, B * math.sin(t) / sz }
+            end
+            lines[#lines + 1] = { points = pts, color = { OUTLINE_COLOR[1], OUTLINE_COLOR[2], OUTLINE_COLOR[3] },
+                                  thickness = OUTLINE_THICK, rotation = { 0, 0, 0 } }
+        end
+        pcall(function() self.setVectorLines(lines) end)
     end
 
     -- A model's gang, by its tags (see ui.gangOf).
@@ -22599,6 +22642,7 @@ function loadRules()
     if not RULES.use(RULES.fetch()) then return false end
     SKILL.arm(fighter)            -- a skill's weapon may have come or gone
     if ui.built then refresh() end
+    ACTIVATION.drawOutline()      -- "Show base outlines" may have changed
     return true
 end
 
@@ -22649,6 +22693,7 @@ function __nqs_mundane_bus.baseChanged(base)
     local label = MODEL.baseLabel(base)
     local was, wasLabel = card.baseSig, card.baseLabel
     card.baseSig, card.baseLabel = sig, label
+    if was ~= sig and ACTIVATION.drawOutline then ACTIVATION.drawOutline(base) end
     if was == nil or was == sig then return end
     __nqs_mundane_bus.emit({
         kind = "state_change", action = "base",
