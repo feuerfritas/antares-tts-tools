@@ -1483,11 +1483,19 @@ end
 -- A Lua literal for a value (strings, numbers, booleans and tables of them),
 -- with table keys sorted so the same data always writes the same text.
 local function luaString(s)
-    return '"' .. s:gsub('[%c"\\]', function(c)
+    -- MoonSharp (TTS) matches a pattern class against a char's LOW BYTE, and
+    -- c:byte() of any char above 127 is 63 ("?"): so "\u{2022}" (low byte
+    -- 0x22, a quote) and "\u{2082}" were caught here and written as "\063",
+    -- "?" on the card (F9, F12; measured live 2026-11-02). The class only
+    -- nominates; a char is escaped when it IS one of these ASCII chars, and
+    -- anything else passes through raw -- the card script is UTF-8 text.
+    return '"' .. s:gsub('[\1-\31\127"\\]', function(c)
         if c == "\n" then return "\\n" elseif c == "\r" then return "\\r"
         elseif c == "\t" then return "\\t" elseif c == '"' then return '\\"'
         elseif c == "\\" then return "\\\\" end
-        return string.format("\\%03d", c:byte())
+        local b = c:byte()
+        if b < 32 or b == 127 then return string.format("\\%03d", b) end
+        return c
     end) .. '"'
 end
 
