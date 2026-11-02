@@ -1,0 +1,79 @@
+# Builds the Mundane Importer and Mundane Controller as ONE Tabletop Simulator
+# saved object (mundane-tools.json + mundane-tools.png), straight from the
+# tools/*/ sources in this repo, using tts-mod-composer
+# (https://gitlab.com/feuerfritas/tts-mod-composer).
+#
+# How it works: each object's JSON shell (tools/<tool>/<Name>.<guid>.json)
+# points at tools/<tool>/tool.lua with `LuaScript_path`. build-object inlines
+# that script (and the XML / default state sidecars) into the shell, so the
+# saved object always carries exactly the Lua in the repo. build/TTSModfile.yaml
+# tells the composer where the objects are.
+#
+#   push (any branch) -> build, upload the files as a workflow artifact
+#   tag v*            -> the same, then attach the files to a GitHub release
+#
+# To build on your own machine, see BUILD.md.
+name: build-objects
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  # The composer release this workflow is built and tested against. Change it
+  # here, and only here, to move to a newer one.
+  COMPOSER_VERSION: v0.18.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # only used to create the release on a tag
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0   # full history and tags, so `git describe` can name the build
+
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install tts-mod-composer
+        run: |
+          python -m pip install pipx
+          pipx install "git+https://gitlab.com/feuerfritas/tts-mod-composer.git@${COMPOSER_VERSION}"
+
+      - name: Build the saved object
+        run: |
+          mkdir -p out
+          # "tools/" is the dependency name in build/TTSModfile.yaml; the rest
+          # is the object's file name without .json. Both objects go into one
+          # saved object, in this order. --stamp appends the version to each
+          # object's Description so a table shows which build it came from.
+          tts-mod-composer build-object \
+            tools/MundaneImporterN26byAntares77.e4e1fb \
+            tools/MundaneControllerN26byAntares77.e27378 \
+            -f build/TTSModfile.yaml \
+            -o out/mundane-tools.json \
+            --stamp "$(git describe --tags --always)"
+          ls -l out
+
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: mundane-tools
+          path: |
+            out/mundane-tools.json
+            out/mundane-tools.png
+          if-no-files-found: error
+
+      - name: Attach to the GitHub release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            out/mundane-tools.json out/mundane-tools.png \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
