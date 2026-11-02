@@ -14473,7 +14473,15 @@ end
 -- half lit), one with its last is Ready no more (see setReady); an active
 -- one with another left for after this activation loses that. Returns how
 -- many are left, or nil when it had none to lose.
-function ACTIVATION.loseMark()
+function ACTIVATION.loseMark(why)
+    -- NQS fork (S2): the readiness change says why (Flash, a Wyrd power)
+    return __nqs_mundane_bus.within("why", why, function()
+        local left = ACTIVATION.loseMarkNow()
+        __nqs_mundane_bus.readiness()
+        return left
+    end)
+end
+function ACTIVATION.loseMarkNow()
     local marks = tonumber(fighter.readyMarks)
     if fighter.activation == "ready" then
         if marks and marks > 1 then
@@ -14534,6 +14542,11 @@ end
 function activate(player)
     if fighter.outOfAction then return 0 end
     ACTIVATION.finishOthers()
+    -- NQS fork (S2, S1-h): the activation starts here -- after any other
+    -- fighter's has finished -- and says the group it was activated with
+    __nqs_mundane_bus.send({ kind = "activation", state = "start",
+        group = fighter.grouped and __nqs_mundane_bus.card.group or nil, by = player })
+    __nqs_mundane_bus.card.group = nil
     setGroupActivated(false)
     if fighter.readyMarks then fighter.readyMarks = math.max(0, fighter.readyMarks - 1) end
     ACTIVATION.delaqueCheck()
@@ -14617,6 +14630,7 @@ function completeActivation()
     onActionsChanged(0)
     chat(again and string.format("%s has completed their activation -- %d more this round", fighter.name, fighter.readyMarks)
          or string.format("%s has completed their activation", fighter.name))
+    __nqs_mundane_bus.send({ kind = "activation", state = "end" })   -- NQS fork (S2, S1-h; optional per S1)
     ACTIVATION.backsEnd()                       -- a fighter that didn't Fight Back goes Out of Action
     ACTIVATION.visionsCheck()
     ACTIVATION.timedEnd()                       -- Concussion wears off, a Webbed check
@@ -14666,11 +14680,15 @@ end
 -- or with false). Only a Ready fighter can be. From other scripts:
 -- obj.call("setGroupActivated", { value = true }). Returns whether it is.
 function setGroupActivated(on)
-    if type(on) == "table" then on = on.value end
+    if type(on) == "table" then
+        __nqs_mundane_bus.card.group = on.value == true and on.group or nil   -- NQS fork (S2): who with
+        on = on.value
+    end
     on = on == true and fighter.activation == "ready" and not fighter.outOfAction
     if on == (fighter.grouped == true) then return on end
     fighter.grouped = on or nil
     ui.drawName()
+    __nqs_mundane_bus.readiness()                  -- NQS fork (S2)
     return on
 end
 
@@ -14726,6 +14744,7 @@ function setOutOfAction(on)
     end
     ACTIVATION.gangMoved()
     ACTIVATION.tellController(not on)
+    __nqs_mundane_bus.readiness()                  -- NQS fork (S2): no longer Ready / active
     -- MI4b-2 state_change publish on Out-of-Action transition. One of the
     -- two round-ending fates for a fighter (the other is a passed Recovery
     -- test, handled in setStatus's own publish above). `why` carries the
@@ -16543,6 +16562,20 @@ function ACTIVATION.strike(t, player)
     if template then
         attack.targets = {}
         for k, a in ipairs(aims) do attack.targets[k] = a.name end
+    end
+    -- NQS fork (S2, S1-g): the attack is its action, declared: weapon,
+    -- profile, firing mode, aimed, and the fighters aimed at, as picked now.
+    -- Only during the fighter's activation: Fighting Back is no action.
+    if fighter.activation == "active" then
+        local names = {}
+        for k, a in ipairs(aims) do if a and a.name then names[#names + 1] = tostring(a.name) end end
+        local pr = type(w) == "table" and type(w.profiles) == "table" and w.profiles[tonumber(attack.profile) or 0]
+        __nqs_mundane_bus.action(player, attack.action or (attack.melee and "fight" or "shoot"), {
+            weapon = tostring(R.name(w) or attack.name or "Weapon"),
+            profile = type(pr) == "table" and pr.name and tostring(pr.name) or attack.profile,
+            mode = attack.mode == "rapid_fire" and "rapid_fire" or "single",
+            aimed = attack.aimed and true or nil, targets = #names > 0 and names or nil,
+        }, names[1], attack.free and true or nil)
     end
     attack.seq = ACTIVATION.attackHeader(verb, aims, player)   -- the rolls that follow come under it
     if back and back.state == "striking" and not back.token then back.token = attack.seq end
@@ -19496,7 +19529,7 @@ function traitHit(t)
     end
     local function blind()
         setCondition("blind", true)
-        local left = ACTIVATION.loseMark()
+        local left = ACTIVATION.loseMark("Flash")
         if left then
             chat(string.format("%s is blinded by %s -- Blind, and loses %s", name, hit,
                 left > 0 and string.format("a Ready marker (%d left)", left) or "their Ready marker"), MOD)
@@ -19747,8 +19780,11 @@ function ACTIVATION.rollGroup(n, player)
         if test.passed and not fighter.outOfAction then
             local near
             near, far = ACTIVATION.groupOf(n.objs)
+            local names = { fighter.name }           -- NQS fork (S2): the group, for each one's activation
+            for _, o in ipairs(near) do names[#names + 1] = tostring(o.name) end
             for _, o in ipairs(near) do
-                local ok, on = ACTIVATION.ask(o.obj, "setGroupActivated", { value = true, by = fighter.name })
+                local ok, on = ACTIVATION.ask(o.obj, "setGroupActivated", { value = true, by = fighter.name,
+                                                                          group = names })
                 if ok and on == true then taken[#taken + 1] = o end
             end
         end
@@ -21436,7 +21472,7 @@ function wyrdTarget(t)
     if not test then return true end
     local function failed()
         if t.fail == "unready" then
-            local left = fighter.activation == "ready" and ACTIVATION.loseMark()
+            local left = fighter.activation == "ready" and ACTIVATION.loseMark(tostring(power))
             if left then
                 P(string.format("%s loses %s (%s)", name,
                     left > 0 and string.format("a Ready marker, %d left", left) or "their Ready marker", power))
@@ -22317,6 +22353,46 @@ function __nqs_mundane_bus.test(label, faces, die, ev)
     __nqs_mundane_bus.send(ev)
 end
 
+-- Readiness (S1-h): `ready`, `active` or `activated` (nil on the card:
+-- not Ready -- activated, Out of Action, or no round yet), with whether
+-- the fighter is group activated and its Ready markers left. Published as
+-- a state_change `readiness` whenever any of them changes from what the
+-- card last published (seeded by setFighter, so a load is no change);
+-- `why` says what took a Ready marker (ACTIVATION.loseMark).
+function __nqs_mundane_bus.readiness(why)
+    local c = __nqs_mundane_bus.card
+    local now = fighter.activation or "activated"
+    local key = now .. "|" .. tostring(fighter.grouped == true) .. "|" .. tostring(fighter.readyMarks)
+    if c.readyKey ~= nil and c.readyKey ~= key then
+        __nqs_mundane_bus.send({ kind = "state_change", action = "readiness", field = "readiness",
+            from = c.ready, to = now, grouped = fighter.grouped and true or nil,
+            ready_marks = tonumber(fighter.readyMarks), why = why or c.why })
+    end
+    c.readyKey, c.ready = key, now
+end
+
+-- An action taken (S1-g): `key` from ACTIONS (or a skill's), its label as
+-- the `action`, the fighter it is aimed at as `target` (picked now, as the
+-- card does), `params`, and `free` when it costs no action (an F one).
+-- The attacks (Fight, Shoot, Braced / Aimed Shot) are published by the
+-- attack itself, with its declaration (ACTIVATION.strike): taken from A's
+-- panel they would be published twice.
+__nqs_mundane_bus.card.ATTACKS = { fight = true, shoot = true, braced_shot = true, aimed_shot = true }
+function __nqs_mundane_bus.action(player, key, params, target, free)
+    local a = ACTIONS[indexOf(ACTIONS, key) or 0] or SKILL.action(key)
+    if not params and __nqs_mundane_bus.card.ATTACKS[tostring(key)] then return end
+    local aims = a and ACTIVATION.aimsAt(a)
+    if target == nil and aims then
+        local names = {}
+        for i, e in ipairs(ACTIVATION.targets(player, true, a.heal ~= nil)) do names[i] = tostring(e.name) end
+        if aims == "one" then target = names[1]
+        elseif #names > 0 then params = params or {}; params.targets = names end
+    end
+    if free == nil and a and not params then free = SKILL.cost(a) == 0 or nil end
+    __nqs_mundane_bus.send({ kind = "action", action = a and a.label and tostring(a.label) or tostring(key),
+        key = tostring(key), target = target, params = params, free = free, by = player })
+end
+
 -- An attack's id, the same on every card it reaches: the attacking card's
 -- GUID and its own count of attacks (ACTIVATION.attackHeader's token).
 -- `from` is the attacker's GUID (a target's card has it as t.from); nil
@@ -22443,6 +22519,8 @@ function setFighter(data)
     local done = __nqs_mundane_bus.card.setFighter(data)
     __nqs_mundane_bus.card.hp = fighter.wounds.current
     __nqs_mundane_bus.card.actionsLeft = fighter.actionsLeft
+    __nqs_mundane_bus.card.readyKey = nil         -- seeded, not published (S2)
+    __nqs_mundane_bus.readiness()
     return done
 end
 
@@ -22457,6 +22535,7 @@ end
 -- after its cost is spent: `key` from ACTIONS.
 function onActionChosen(player, key)
     -- STUB: what each action does goes here.
+    __nqs_mundane_bus.action(player, key)          -- NQS fork (S2): the action on the bus
 end
 
 -- Fired when the actions left change: activated (2, or 1), spent, readied
@@ -22476,6 +22555,7 @@ function onActionsChanged(left)
         })
     end
     c.actionsLeft = to
+    __nqs_mundane_bus.readiness()                  -- NQS fork (S2): ready / active / activated
 end
 
 -- Fired when a condition's stacks change (C's panel, the bar under the
