@@ -13445,10 +13445,14 @@ do
     -- the importer, or measured once and kept); else CFG.baseDefault.
     function currentBase()
         local ok, desc = pcall(function() return self.getDescription() end)
-        local described = ok and MODEL.baseFromLine(self, desc, validBase(fighter.base))
-        if described then return described end
-        if not validBase(fighter.base) then fighter.base = MODEL.measureBase(self) end
-        return fighter.base or MODEL.baseRecord(CFG.baseDefault, "default")
+        local base = ok and MODEL.baseFromLine(self, desc, validBase(fighter.base))
+        if not base then
+            if not validBase(fighter.base) then fighter.base = MODEL.measureBase(self) end
+            base = fighter.base or MODEL.baseRecord(CFG.baseDefault, "default")
+        end
+        -- NQS fork: a change of base is published (see __nqs_mundane_bus.baseChanged)
+        __nqs_mundane_bus.baseChanged(base)
+        return base
     end
 
     -- A model's gang, by its tags (see ui.gangOf).
@@ -15378,6 +15382,20 @@ end
 -- "Base: 32mm" line in the description first, then one set by setBase or
 -- passed in by the importer, else the model measured (once, then saved).
 function getBase() return currentBase() end
+
+-- The footprint in world terms (for game-recorder's base ring and S5's
+-- tools): { shape = "round" | "oval", length, width (inches), yaw = the
+-- angle of the length axis in degrees from world +x towards +z, 0 to 180
+-- (0 for a round base), x, z = the centre }. nil while the model is not on
+-- the table.
+function getFootprint()
+    local b, pos = currentBase(), positionOf(self)
+    if not pos then return nil end
+    local fp = MODEL.footprintOf(b, MODEL.yawOf(self))
+    local yaw = 0
+    if fp then yaw = math.deg((math.atan2 or math.atan)(fp.uz, fp.ux)) % 180 end
+    return { shape = b.shape, length = b.length, width = b.width, yaw = yaw, x = pos.x, z = pos.z }
+end
 
 -- Sets the base by hand, taken as given: a size in mm (32, "32mm",
 -- { mm = 32 }, { value = 32 }) or { diameter = inches }. nil or "auto"
@@ -22616,8 +22634,32 @@ function __nqs_mundane_bus.statChanged(field, key, from, to)
         field = field, key = tostring(key), from = from, to = to,
     })
 end
+-- NQS fork (S3): a change of base on the bus, `state_change` field "base".
+-- The first base the card sees after a load (or a new fighter, see the
+-- setFighter wrapper below) is only remembered; after that a change of
+-- shape, size or axis is published, once. `from` / `to` read like a
+-- description line ("32mm", "90x52mm oval"); `shape`, `length`, `width`
+-- (inches) and `axis` are the new base's. Seen on the next time the card
+-- asks for its base, so a description edited by hand is published then.
+function __nqs_mundane_bus.baseChanged(base)
+    local card = __nqs_mundane_bus.card
+    if not card or type(base) ~= "table" then return end
+    local sig = string.format("%s|%.4f|%.4f|%s", tostring(base.shape), tonumber(base.length) or 0,
+                              tonumber(base.width) or 0, tostring(base.axis))
+    local label = MODEL.baseLabel(base)
+    local was, wasLabel = card.baseSig, card.baseLabel
+    card.baseSig, card.baseLabel = sig, label
+    if was == nil or was == sig then return end
+    __nqs_mundane_bus.emit({
+        kind = "state_change", action = "base",
+        fighter = fighter and fighter.name or nil,
+        field = "base", from = wasLabel, to = label,
+        shape = base.shape, length = base.length, width = base.width, axis = base.axis,
+    })
+end
 function setFighter(data)
     local done = __nqs_mundane_bus.card.setFighter(data)
+    __nqs_mundane_bus.card.baseSig = nil
     __nqs_mundane_bus.card.hp = fighter.wounds.current
     __nqs_mundane_bus.card.actionsLeft = fighter.actionsLeft
     return done

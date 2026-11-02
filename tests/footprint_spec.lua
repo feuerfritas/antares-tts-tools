@@ -193,5 +193,26 @@ do
     near(fp.ux, 0, 1e-9, "local x at yaw 90 points along world -z"); near(fp.uz, -1, 1e-9, "uz -1")
 end
 
+-- ── the base on the bus ───────────────────────────────────
+do
+    local fnSrc = assert(src:match("(function __nqs_mundane_bus%.baseChanged%(base%).-\nend)\n"), "baseChanged not found")
+    local events = {}
+    local env = { __nqs_mundane_bus = { card = {}, emit = function(e) events[#events + 1] = e end },
+                  MODEL = MODEL, fighter = { name = "Orrom" }, string = string, tostring = tostring,
+                  tonumber = tonumber, type = type }
+    assert(load(fnSrc, "baseChanged", "t", env))()
+    local bc = env.__nqs_mundane_bus.baseChanged
+    bc(MODEL.baseRecord(50, "measured"))
+    check(#events == 0, "the first base is only remembered")
+    bc(MODEL.baseRecord(50, "measured")); check(#events == 0, "an unchanged base publishes nothing")
+    bc(MODEL.baseRecord(52, "description", nil, nil, nil, 90, "x"))
+    check(#events == 1 and events[1].field == "base" and events[1].action == "base" and events[1].kind == "state_change", "a change is a state_change")
+    check(events[1].from == "50mm" and events[1].to == "90x52mm oval" and events[1].shape == "oval" and events[1].axis == "x", "from, to, shape, axis")
+    bc(MODEL.baseRecord(52, "manual", nil, nil, nil, 90, "x")); check(#events == 1, "same footprint, other source: nothing")
+    bc(MODEL.baseRecord(52, "manual", nil, nil, nil, 90, "z")); check(#events == 2, "a turned axis is a change")
+    env.__nqs_mundane_bus.card.baseSig = nil
+    bc(MODEL.baseRecord(32)); check(#events == 2, "a new fighter reseeds")
+end
+
 if fails > 0 then print(fails .. " of " .. n .. " checks FAILED"); os.exit(1) end
 print("footprint_spec: " .. n .. " checks passed")
