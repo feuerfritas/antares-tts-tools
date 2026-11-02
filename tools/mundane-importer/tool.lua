@@ -22137,7 +22137,7 @@ function ACTIVATION.coup(player, again)
         if not aim then
             announce(string.format("%s - Coup de Grace: %s%s", fighter.name, own,
                 digital and " (rolled digitally)" or ""), color)
-            __nqs_mundane_bus.test("Coup de Grâce", { f }, "D6", { strength = s, modifier = mod ~= 0 and mod or nil,   -- NQS fork (S2)
+            __nqs_mundane_bus.test("Coup de Grace", { f }, "D6", { strength = s, modifier = mod ~= 0 and mod or nil,   -- NQS fork (S2)
                 outcome = { total = mine }, by = color or player })
             ACTIVATION.showDice(roll)
             onCoupRolled(player, r)
@@ -22243,7 +22243,7 @@ function ACTIVATION.coupEnd(duel, foe)
         local okG, guid = pcall(function() return aim.obj.getGUID() end)
         local dice = __nqs_mundane_bus.diceArray({ r.face, ff }, "D6")
         if dice[1] and dice[2] then dice[1].as, dice[2].as = "attacker", "defender" end
-        __nqs_mundane_bus.test("Coup de Grâce", nil, nil, {
+        __nqs_mundane_bus.test("Coup de Grace", nil, nil, {
             dice = dice, strength = r.s, modifier = r.mod, target_fighter = aim.name, target_guid = okG and guid or nil,
             target_strength = foeS, reroll = r.rerolled, reroll_why = r.rerolled and "Cut-Throat" or nil,
             outcome = { passed = r.out, total = r.total, foe_total = theirs, out_of_action = r.out,
