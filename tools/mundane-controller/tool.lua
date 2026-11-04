@@ -46,8 +46,9 @@ if __nqs_mundane_bus == nil then
   end
 
   -- A Firepower or Injury dice is published as the face it shows, not its
-  -- number: "1+ammo", "1", "2", "3"; "Injury", "Serious Injury", "Out of
-  -- Action". The faces are the rules' (RULES.firepower, RULES.injuryDice,
+  -- number: "Ammo Check", "1 hit", "2 hits", "3 hits" (the NQS roller's own
+  -- words, never a bare digit, which would read as the die's number);
+  -- "Injury", "Serious Injury", "Out of Action". The faces are the rules' (RULES.firepower, RULES.injuryDice,
   -- RULES.injury, which a table can override), handed over by the RULES
   -- block as __nqs_mundane_bus.rules. Any other dice, or a script with no
   -- rules, publishes its number (tts-webplayer reads a bare number with the
@@ -56,8 +57,10 @@ if __nqs_mundane_bus == nil then
     local R, n = __nqs_mundane_bus.rules, tonumber(value)
     if type(R) == "table" and n ~= nil then
       if kind == "FIREPOWER" and type(R.firepower) == "table" and type(R.firepower[n]) == "table" then
-        local fp = R.firepower[n]
-        return tostring(fp.hits or n) .. (fp.ammo and "+ammo" or "")
+        local fp, hits = R.firepower[n], tonumber(R.firepower[n].hits) or 1
+        local word = hits == 1 and "1 hit" or (tostring(hits) .. " hits")
+        if fp.ammo then return hits == 1 and "Ammo Check" or (word .. ", Ammo Check") end
+        return word
       elseif kind == "INJURY" and type(R.injuryDice) == "table" and R.injuryDice[n] ~= nil then
         local key = R.injuryDice[n]
         local res = type(R.injury) == "table" and R.injury[key] or nil
