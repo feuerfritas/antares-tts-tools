@@ -57,8 +57,38 @@ if __nqs_mundane_bus == nil then
   -- event the recorder could not take in is still not a reason to break
   -- MI's play, and MI's ACTIVATION callbacks run inside TTS's event loop
   -- where an uncaught error would crash the handler.
+  -- The recorders are looked up once and kept, not found again for every
+  -- event: getObjectsWithTag walks every object on the table. The list is
+  -- found again only when one of the kept recorders is gone (destroyed,
+  -- or no longer tagged, as when `make install` replaces it), or when
+  -- there was none: with no recorder on the table every publish still
+  -- looks, as before, so a recorder put down mid-game is found on the next
+  -- event. A second recorder added beside a kept one is not seen until the
+  -- kept one goes.
+  local function __nqs_live_recorder(obj)
+    if obj == nil then return false end
+    local ok, live = pcall(function()
+      return not obj.isDestroyed() and obj.hasTag("gamerecorder")
+    end)
+    return ok and live
+  end
+
+  function __nqs_mundane_bus.recorders()
+    local kept = __nqs_mundane_bus.__recorders
+    if kept ~= nil and #kept > 0 then
+      local all_live = true
+      for _, obj in ipairs(kept) do
+        if not __nqs_live_recorder(obj) then all_live = false break end
+      end
+      if all_live then return kept end
+    end
+    kept = getObjectsWithTag("gamerecorder") or {}
+    __nqs_mundane_bus.__recorders = kept
+    return kept
+  end
+
   function __nqs_mundane_bus.publish(json_string)
-    for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
+    for _, obj in ipairs(__nqs_mundane_bus.recorders()) do
       pcall(obj.call, "bus_publish", json_string)
     end
   end
@@ -2472,8 +2502,33 @@ CARD_SCRIPT = [=[
 if __nqs_mundane_bus == nil then
   __nqs_mundane_bus = { __seq = 0, stamp_guid = true }
 
+  -- Recorders are kept between events and found again only when one is
+  -- gone or there was none. See the Mundane Importer's copy for the full
+  -- header.
+  local function __nqs_live_recorder(obj)
+    if obj == nil then return false end
+    local ok, live = pcall(function()
+      return not obj.isDestroyed() and obj.hasTag("gamerecorder")
+    end)
+    return ok and live
+  end
+
+  function __nqs_mundane_bus.recorders()
+    local kept = __nqs_mundane_bus.__recorders
+    if kept ~= nil and #kept > 0 then
+      local all_live = true
+      for _, obj in ipairs(kept) do
+        if not __nqs_live_recorder(obj) then all_live = false break end
+      end
+      if all_live then return kept end
+    end
+    kept = getObjectsWithTag("gamerecorder") or {}
+    __nqs_mundane_bus.__recorders = kept
+    return kept
+  end
+
   function __nqs_mundane_bus.publish(json_string)
-    for _, obj in ipairs(getObjectsWithTag("gamerecorder")) do
+    for _, obj in ipairs(__nqs_mundane_bus.recorders()) do
       pcall(obj.call, "bus_publish", json_string)
     end
   end
