@@ -23010,6 +23010,7 @@ function onSave()
         fighter  = fighter,
         visible  = ui.visible,
         importId = ui.importId,   -- which import the fighter came from
+        attackCount = ACTIVATION.seqCount,   -- so an attack id is never reused after a reload
     })
 end
 
@@ -23020,6 +23021,10 @@ function onLoad(savedState)
         if ok and type(data) == "table" then restored = data end
     end
     if restored and restored.visible ~= nil then ui.visible = restored.visible end
+    -- An attack id is <this card>:<its count>, and a record outlives a reload:
+    -- starting from 0 again gave two attacks one id (game-recorder#2). Kept across
+    -- a fresh import too, which is the same card and the same record.
+    if restored and tonumber(restored.attackCount) then ACTIVATION.seqCount = tonumber(restored.attackCount) end
 
     -- A fresh import (an id this model hasn't loaded yet) replaces whatever
     -- was saved; otherwise the saved fighter carries on.
