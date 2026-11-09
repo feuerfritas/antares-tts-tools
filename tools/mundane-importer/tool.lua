@@ -238,9 +238,11 @@ end
 --   Looking means copying the whole script out of TTS -- a fighter card's
 -- is most of a megabyte, and a new turn asks every one. So a script that
 -- carries MUNDA_STAMP (a mark it sets anew each time it loads: the cards,
--- this script) is read once: every function it has is noted (KNOWN, by
--- GUID) and holds for as long as its mark stays the same -- a reload, a
--- card brought up to date, gives it a new one.
+-- this script) has the answer for each function noted (KNOWN, by GUID),
+-- and that holds for as long as its mark stays the same -- a reload, a
+-- card brought up to date, gives it a new one. Only the function asked
+-- about is looked for: listing every function a card has took 280 ms a
+-- card in TTS (NQS#3), a plain find for one name about 3 ms.
 MUNDA_STAMP = table.concat({ os.time(), os.clock(), math.random(1, 999999999) }, "-")
 local KNOWN = {}
 local function callIfHas(obj, fn, arg)
@@ -249,18 +251,20 @@ local function callIfHas(obj, fn, arg)
     local known, has = guid and KNOWN[guid], nil
     if known then
         local ok, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
-        if ok and stamp ~= nil and stamp == known.stamp then has = known.fns[fn] == true else KNOWN[guid] = nil end
+        if ok and stamp ~= nil and stamp == known.stamp then has = known.fns[fn] else KNOWN[guid], known = nil, nil end
     end
     if has == nil then
         local ok, script = pcall(function() return obj.getLuaScript() end)
         has = not (ok and type(script) == "string") or script:find("function " .. fn .. "(", 1, true) ~= nil
-        if ok and type(script) == "string" and guid and script:find("MUNDA_STAMP", 1, true) then
-            local okV, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
-            if okV and stamp ~= nil then
-                local fns = {}
-                for name in script:gmatch("function ([%w_]+)%(") do fns[name] = true end
-                KNOWN[guid] = { stamp = stamp, fns = fns }
+        if ok and type(script) == "string" then
+            if not known and guid and script:find("MUNDA_STAMP", 1, true) then
+                local okV, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
+                if okV and stamp ~= nil then
+                    known = { stamp = stamp, fns = {} }
+                    KNOWN[guid] = known
+                end
             end
+            if known then known.fns[fn] = has end
         end
     end
     if not has then return false end
@@ -7103,11 +7107,15 @@ end
 -- called anyway.
 --   Looking means copying the other object's whole script out of TTS --
 -- a card's is most of a megabyte -- and some actions ask every fighter on
--- the table. So a script that carries MUNDA_STAMP (a mark it sets anew
+-- the table. So for a script that carries MUNDA_STAMP (a mark it sets anew
 -- each time it loads: these cards, the Mundane Importer and Controller)
--- is read once: every function it has is noted (ACTIVATION.scripts, by
--- GUID) and that holds for as long as its mark stays the same -- a
--- reload, a card brought up to date, gives it a new one.
+-- the answer for each function is noted (ACTIVATION.scripts, by GUID) and
+-- holds for as long as its mark stays the same -- a reload, a card brought
+-- up to date, gives it a new one. Only the function asked about is looked
+-- for, never every function the script has: listing them all with a
+-- pattern took 280 ms a card in TTS, so a card's first activation after a
+-- load, asking the other five, froze the game for 2 s (NQS#3). A plain
+-- find for one name takes about 3 ms.
 MUNDA_STAMP = table.concat({ os.time(), os.clock(), math.random(1, 999999999) }, "-")
 ACTIVATION.scripts = {}
 function ACTIVATION.has(obj, fn)
@@ -7116,20 +7124,24 @@ function ACTIVATION.has(obj, fn)
     local known = guid and ACTIVATION.scripts[guid]
     if known then
         local ok, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
-        if ok and stamp ~= nil and stamp == known.stamp then return known.fns[fn] == true end
-        ACTIVATION.scripts[guid] = nil
+        if ok and stamp ~= nil and stamp == known.stamp then
+            if known.fns[fn] ~= nil then return known.fns[fn] end
+        else
+            ACTIVATION.scripts[guid], known = nil, nil
+        end
     end
     local ok, script = pcall(function() return obj.getLuaScript() end)
     if not ok or type(script) ~= "string" then return true end
-    if guid and script:find("MUNDA_STAMP", 1, true) then
+    local has = script:find("function " .. fn .. "(", 1, true) ~= nil
+    if not known and guid and script:find("MUNDA_STAMP", 1, true) then
         local okV, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
         if okV and stamp ~= nil then
-            local fns = {}
-            for name in script:gmatch("function ([%w_]+)%(") do fns[name] = true end
-            ACTIVATION.scripts[guid] = { stamp = stamp, fns = fns }
+            known = { stamp = stamp, fns = {} }
+            ACTIVATION.scripts[guid] = known
         end
     end
-    return script:find("function " .. fn .. "(", 1, true) ~= nil
+    if known then known.fns[fn] = has end
+    return has
 end
 
 -- obj.call(fn, arg), protected, only if `obj` has `fn` (see
