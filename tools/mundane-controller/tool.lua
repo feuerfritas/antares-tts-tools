@@ -1259,6 +1259,8 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 Activation in A's panel highlights every friend within
 --                 groupRange, on Distribute Ammo every friend within its
 --                 range.
+--   baseOutlines  true: each fighter's base is drawn on the model as a thin
+--                 ring (setVectorLines; the "Show base outlines" setting).
 --   agility       Agility test: one D6, passed on this or more;
 --   escherGang    House Escher's rules: they go to the fighters of a gang
 --                 of this `type` (the type as the roster names it under the
@@ -1371,6 +1373,7 @@ RULES.cfg = {
     nerveOutFoes  = false,
     groupRange    = 3,
     preMeasure    = false,
+    baseOutlines  = false,
     agility       = 4,
     escherGang    = { type = "House Escher", agility = "ones",
                       unless = { "Chaos Corrupted", "Genestealer Corrupted", "Genestealer Infected",
@@ -1756,6 +1759,10 @@ local HOMEBREW = {
           offDesc = "Nothing shows who is in range before an action is taken: distances are judged by eye.",
           desc = "The cursor on Group Activation or Distribute Ammo highlights friendly fighters within range.",
           rules = { cfg = { preMeasure = true } } },
+        { id = "base_outlines", off = "Hide base outlines", name = "Show base outlines", gameplay = true,
+          offDesc = "Bases are not drawn: contact and 1\" gaps are judged by eye, or with the card's own checks.",
+          desc = "Each fighter's base is drawn as a thin ring on its model, round or oval, so both players can see contact.",
+          rules = { cfg = { baseOutlines = true } } },
         { id = "long_powers", off = "RAW Continuous Powers", name = "Long Continuous Powers",
           offDesc = "A Continuous Power lasts until the end of the Wyrd's activation (if not Maintain Control (S)).",
           desc = "A Continuous Power lasts until the end of the Wyrd's next activation.",
