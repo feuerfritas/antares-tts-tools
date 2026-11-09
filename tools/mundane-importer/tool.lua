@@ -76,10 +76,35 @@ if __nqs_mundane_bus == nil then
   -- SPEC's "Rolls" section: one entry per die, `{type, value, face}` in roll
   -- order. `kind` overrides the default "D6"; a non-D6 roll (FIREPOWER die,
   -- Injury dice) names its own kind, matching gang-roster's `Rolls.DICE` keys.
+  -- A Firepower or Injury dice is published as the face it shows, not its
+  -- number: "Ammo Check", "1 hit", "2 hits", "3 hits" (the NQS roller's own
+  -- words, never a bare digit, which would read as the die's number);
+  -- "Injury", "Serious Injury", "Out of Action". The faces are the rules' (RULES.firepower, RULES.injuryDice,
+  -- RULES.injury, which a table can override), handed over by the RULES
+  -- block as __nqs_mundane_bus.rules. Any other dice, or a script with no
+  -- rules, publishes its number (tts-webplayer reads a bare number with the
+  -- default chart).
+  function __nqs_mundane_bus.faceOf(kind, value)
+    local R, n = __nqs_mundane_bus.rules, tonumber(value)
+    if type(R) == "table" and n ~= nil then
+      if kind == "FIREPOWER" and type(R.firepower) == "table" and type(R.firepower[n]) == "table" then
+        local fp, hits = R.firepower[n], tonumber(R.firepower[n].hits) or 1
+        local word = hits == 1 and "1 hit" or (tostring(hits) .. " hits")
+        if fp.ammo then return hits == 1 and "Ammo Check" or (word .. ", Ammo Check") end
+        return word
+      elseif kind == "INJURY" and type(R.injuryDice) == "table" and R.injuryDice[n] ~= nil then
+        local key = R.injuryDice[n]
+        local res = type(R.injury) == "table" and R.injury[key] or nil
+        return type(res) == "table" and res.label or tostring(key)
+      end
+    end
+    return tostring(value)
+  end
+
   function __nqs_mundane_bus.diceArray(faces, kind)
     local out = {}
     for i, f in ipairs(faces) do
-      out[i] = { type = kind or "D6", value = f, face = tostring(f) }
+      out[i] = { type = kind or "D6", value = f, face = __nqs_mundane_bus.faceOf(kind, f) }
     end
     return out
   end
@@ -2483,10 +2508,35 @@ if __nqs_mundane_bus == nil then
     return __nqs_mundane_bus.__seq
   end
 
+  -- A Firepower or Injury dice is published as the face it shows, not its
+  -- number: "Ammo Check", "1 hit", "2 hits", "3 hits" (the NQS roller's own
+  -- words, never a bare digit, which would read as the die's number);
+  -- "Injury", "Serious Injury", "Out of Action". The faces are the rules' (RULES.firepower, RULES.injuryDice,
+  -- RULES.injury, which a table can override), handed over by the RULES
+  -- block as __nqs_mundane_bus.rules. Any other dice, or a script with no
+  -- rules, publishes its number (tts-webplayer reads a bare number with the
+  -- default chart).
+  function __nqs_mundane_bus.faceOf(kind, value)
+    local R, n = __nqs_mundane_bus.rules, tonumber(value)
+    if type(R) == "table" and n ~= nil then
+      if kind == "FIREPOWER" and type(R.firepower) == "table" and type(R.firepower[n]) == "table" then
+        local fp, hits = R.firepower[n], tonumber(R.firepower[n].hits) or 1
+        local word = hits == 1 and "1 hit" or (tostring(hits) .. " hits")
+        if fp.ammo then return hits == 1 and "Ammo Check" or (word .. ", Ammo Check") end
+        return word
+      elseif kind == "INJURY" and type(R.injuryDice) == "table" and R.injuryDice[n] ~= nil then
+        local key = R.injuryDice[n]
+        local res = type(R.injury) == "table" and R.injury[key] or nil
+        return type(res) == "table" and res.label or tostring(key)
+      end
+    end
+    return tostring(value)
+  end
+
   function __nqs_mundane_bus.diceArray(faces, kind)
     local out = {}
     for i, f in ipairs(faces) do
-      out[i] = { type = kind or "D6", value = f, face = tostring(f) }
+      out[i] = { type = kind or "D6", value = f, face = __nqs_mundane_bus.faceOf(kind, f) }
     end
     return out
   end
@@ -3396,6 +3446,10 @@ local ASSETS = {
 -- RULES; the card knows its parts by their old names too (ACTIONS =
 -- RULES.actions, ...).
 local RULES = {}
+-- The bus publishes a Firepower or Injury dice as the face these rules give
+-- it (__nqs_mundane_bus.faceOf), so it is handed this table: RULES.use
+-- changes the parts in place, and the bus reads a table's own chart.
+if __nqs_mundane_bus ~= nil then __nqs_mundane_bus.rules = RULES end
 
 -- The kinds of action, each with its colour in A's panel: a colour of the
 -- card's (a COL key) or one of its own ("#RRGGBB").
@@ -17387,7 +17441,7 @@ function ACTIVATION.drag(attack, aim, player)
         __nqs_mundane_bus.try(function()           -- NQS fork (S2): the Drag on the bus, its inches
             local id = __nqs_mundane_bus.attackId(attack.seq)
             local dice = { { type = "D6", value = f, face = tostring(f), as = "drag" },
-                           { type = "FIREPOWER", value = fp, face = tostring(fp), as = "inches" } }
+                           { type = "FIREPOWER", value = fp, face = __nqs_mundane_bus.faceOf("FIREPOWER", fp), as = "inches" } }
             __nqs_mundane_bus.test("Drag", nil, nil, { dice = dice, direction = "gte", target = s,
                 weapon = attack.name and tostring(attack.name) or nil, target_fighter = aim.name,
                 outcome = { passed = ok, inches = ok and inches or nil }, attack_id = id, group = id, by = player })
@@ -22689,7 +22743,8 @@ function __nqs_mundane_bus.hitDice(faces, kinds, ammo)
     for i, f in ipairs(faces) do
         if i ~= ammo then
             local fp = kinds[i] == "firepower"
-            out[#out + 1] = { type = fp and "FIREPOWER" or "D6", value = f, face = tostring(f),
+            out[#out + 1] = { type = fp and "FIREPOWER" or "D6", value = f,
+                              face = fp and __nqs_mundane_bus.faceOf("FIREPOWER", f) or tostring(f),
                               as = fp and "firepower" or "hit" }
         end
     end
