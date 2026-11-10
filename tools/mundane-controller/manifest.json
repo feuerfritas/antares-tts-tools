@@ -1,6 +1,16 @@
 {
   "stable": {
-    "version": "3.0.0",
+    "version": "3.1.0",
+    "notes": [
+    "Loading and performance improvements",
+    "Spectating works correctly now",
+    "- Seat as Grey for performance",
+    "- Seat as a Color for the full experience",
+    "1v1, 1v2, 2v2 is supported now. Move another fighter to the scoreboard to initialize a team"
+    ]
+  },
+  "history": [
+    {"version": "3.0.0",
     "notes": [
     "Full Template, Blast and Unstable attacks support (+Homebrew option for unstable)",
     "Dice effect tags (Shred, Blaze, Rending...) and much better chat messages",
@@ -9,8 +19,7 @@
     "Online reference page for all supported abilities, rules, skills and traits (also on the Controller)",
     "Many smaller fixes and readability improvements"
     ]
-  },
-  "history": [
+    },
     {"version": "2.2.2",
     "notes": [
       "Added support for Precision Shot + Homebrew rule."
