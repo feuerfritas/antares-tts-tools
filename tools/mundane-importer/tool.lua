@@ -15548,6 +15548,7 @@ return frames > 2 and (not ok or still == true)
 end, CFG.engageSettle, go)
 end
 ]=]
+-- validate: SELF_UPDATE=false is intentional (fork pin)
 
 -- ===========================================================================
 -- Everything below this line is updater/updater.lua, pasted unchanged.

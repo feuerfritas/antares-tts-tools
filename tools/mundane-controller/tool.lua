@@ -3289,6 +3289,7 @@ if TEAM.playingMsg().all then TEAM.told = "all" else TEAM.tellCards(true) end
 Wait.time(BOTTLE.tick, BOTTLE.POLL, -1)
 if next(RULES.active) then Wait.frames(function() RULES.push(RULES.STAGGER) end, 2) end
 end
+-- validate: SELF_UPDATE=false is intentional (fork pin)
 
 -- ===========================================================================
 -- Everything below this line is updater/updater.lua, pasted unchanged.
