@@ -597,6 +597,7 @@ cursed = "cursed",
 flash = "flash",
 graviton = "graviton pulse",
 lance = "lance",
+driveBy = "drive[%s%-]?by",
 lanceBomb = "lance%-bomb",
 template = "template",
 drag = "drag",
@@ -642,6 +643,7 @@ outcastGang = { type = "Outcasts", range = 6, nerve = true, fearsome = true },
 readyMarks = { spyrer = 2 },
 extraArm = { rule = "Extra Arm", cost = "S" },
 fixedMove = { "mounted" },
+mountedHeavy = { "mounted" },
 fallSave = 3,
 fallLevels = { 3, 6 },
 disruptRange = 18,
@@ -852,11 +854,11 @@ rules = { cfg = { rapidOneHit = true } } },
 offDesc = "A natural 1 on an Unstable weapon's Hit roll: every hit the Firepower dice show goes to the shooter.",
 desc = "A natural 1 on an Unstable weapon's Hit roll: 1 hit on the shooter.",
 rules = { cfg = { unstableAll = false } } },
-{ id = "hand_heavy", off = "Hand Weapon (no melee / no light)", name = "Hand Weapon (no melee)",
+{ id = "hand_heavy", off = "Hand Weapon (no melee / no light)", name = "Heavy Hand Weapon (melee)",
 offDesc = "A fighter with neither a Melee nor a Light weapon fights with a Hand Weapon (E, S, AP -, L 1, Melee).",
-desc = "A fighter with no Melee weapon fights with a Hand Weapon (E, S, AP -, L 1, Heavy, Melee), Light weapons or not.",
-rules = { cfg = { handWeapon = { light = false, profiles = {
-{ SR = "E", LR = "-", S = "S", AP = "-", L = "1", traits = "Heavy, Melee" } } } } } },
+desc = "No Melee weapon (Light / AA weapons don't count): a Hand Weapon (E, S, AP -, L 1, Heavy, Melee, DriveBy).",
+rules = { cfg = { handWeapon = { light = false, ignoreAA = true, profiles = {
+{ SR = "E", LR = "-", S = "S", AP = "-", L = "1", traits = "Heavy, Melee, DriveBy" } } } } } },
 },
 on = {},
 pick = {},
@@ -3315,7 +3317,7 @@ end
 local SELF_UPDATE    = false
 local REPO_BASE      = "https://raw.githubusercontent.com/feuerfritas/antares-tts-tools/main"
 local TOOL_ID        = "mundane-controller"
-local TOOL_VERSION   = "3.1.0"                 -- bumped with manifest.json
+local TOOL_VERSION   = "3.1.1"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-controller"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error

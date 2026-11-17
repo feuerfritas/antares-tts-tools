@@ -543,13 +543,6 @@ local PANEL = { position = "0 450 -5", rotation = "0 0 180", scale = "1 1 1" }
 local TEMPLATES_URL = ""
 local TEMPLATES_SOON = "...coming soon"
 local CHANGELOG = {
-{ version = "3.1.0", note = "Major Update", changes = {
-"Loading and performance improvements",
-"Spectating works correctly now",
-"- Seat as Grey for performance",
-"- Seat as a Color for the full experience",
-"1v1, 1v2, 2v2 is supported now. Move another fighter to the scoreboard to initialize a team"
-} },
 { version = "3.0.0", note = "Huge Update", changes = {
 "Full Template, Blast and Unstable attacks support (+Homebrew option for unstable)",
 "Dice effect tags (Shred, Blaze, Rending...) and much better chat messages",
@@ -2350,6 +2343,7 @@ cursed = "cursed",
 flash = "flash",
 graviton = "graviton pulse",
 lance = "lance",
+driveBy = "drive[%s%-]?by",
 lanceBomb = "lance%-bomb",
 template = "template",
 drag = "drag",
@@ -2395,6 +2389,7 @@ outcastGang = { type = "Outcasts", range = 6, nerve = true, fearsome = true },
 readyMarks = { spyrer = 2 },
 extraArm = { rule = "Extra Arm", cost = "S" },
 fixedMove = { "mounted" },
+mountedHeavy = { "mounted" },
 fallSave = 3,
 fallLevels = { 3, 6 },
 disruptRange = 18,
@@ -5427,12 +5422,22 @@ function R.fightsWith(p)
 return isMelee(p) or (fighter.status == "engaged" and hasTrait(p, TRAIT.light))
 end
 function R.fightReady(p)
+if R.mountBlocked(p) then return false end
 return isMelee(p) or (hasTrait(p, TRAIT.light) and not profileDown(p))
+end
+function R.mountBlocked(p)
+if not (isMelee(p) and hasTrait(p, TRAIT.heavy)) then return false end
+if (TRAIT.lance and hasTrait(p, TRAIT.lance)) or (TRAIT.driveBy and hasTrait(p, TRAIT.driveBy)) then return false end
+local tags = ACTIVATION.tags()
+for _, t in ipairs(type(CFG.mountedHeavy) == "table" and CFG.mountedHeavy or {}) do
+if tags[tostring(t):lower()] then return true end
+end
+return false
 end
 function R.fightProfiles(w)
 local out = {}
 for _, p in ipairs((w and w.profiles) or {}) do
-if isMelee(p) or hasTrait(p, TRAIT.light) then out[#out + 1] = p end
+if (isMelee(p) or hasTrait(p, TRAIT.light)) and not R.mountBlocked(p) then out[#out + 1] = p end
 end
 return out
 end
@@ -9542,7 +9547,7 @@ if give and hand and hand.hand == mark then
 all[#all + 1] = hand
 elseif give then
 local w = RULES.copy(give)
-w.light, w.hand = nil, mark
+w.light, w.ignoreAA, w.hand = nil, nil, mark
 all[#all + 1], changed = w, true
 elseif hand then
 changed = true
@@ -9556,7 +9561,8 @@ local hw = CFG.handWeapon
 if type(hw) ~= "table" or type(hw.profiles) ~= "table" then return nil end
 for _, w in ipairs(list) do
 for _, p in ipairs(w.profiles or {}) do
-if isMelee(p) or (hw.light and hasTrait(p, TRAIT.light)) then
+local melee = isMelee(p) and (not hw.ignoreAA or not TRAIT_RULES.number(p, TRAIT.additional))
+if melee or (hw.light and hasTrait(p, TRAIT.light)) then
 return nil
 end
 end
@@ -15570,7 +15576,7 @@ end
 local SELF_UPDATE    = false
 local REPO_BASE      = "https://raw.githubusercontent.com/feuerfritas/antares-tts-tools/main"
 local TOOL_ID        = "mundane-importer"
-local TOOL_VERSION   = "3.1.0"                 -- bumped with manifest.json
+local TOOL_VERSION   = "3.1.1"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-importer"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
