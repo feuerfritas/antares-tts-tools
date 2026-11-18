@@ -15492,6 +15492,7 @@ return JSON.encode({
 fighter = fighter,
 visible = ui.visible,
 importId = ui.importId,
+attackCount = ACTIVATION.seqCount,
 })
 end
 function onLoad(savedState)
@@ -15501,6 +15502,7 @@ local ok, data = pcall(function() return JSON.decode(savedState) end)
 if ok and type(data) == "table" then restored = data end
 end
 if restored and restored.visible ~= nil then ui.visible = restored.visible end
+if restored and tonumber(restored.attackCount) then ACTIVATION.seqCount = tonumber(restored.attackCount) end
 local fresh = type(IMPORTED) == "table" and IMPORTED.fighter
 and not (restored and restored.importId == IMPORTED.id)
 local data = fresh and IMPORTED.fighter or (restored and restored.fighter)
