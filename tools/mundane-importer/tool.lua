@@ -363,6 +363,7 @@ end
 local MODEL = {
 BASE_SIZES = { 25, 28.5, 32, 40, 50, 60 },
 BASE_SNAP = 2.5,
+OVAL_SIZES = { {60, 35}, {75, 42}, {90, 52}, {105, 70}, {120, 92}, {170, 105} },
 MM_PER_INCH = 25.4,
 LOOKS_DEFAULT = {
 background = "#1D2027",
@@ -389,9 +390,13 @@ local function trim(s)
 s = tostring(s or ""):gsub("^%s+", "")
 return (s:gsub("%s+$", ""))
 end
-function MODEL.baseRecord(mm, source, raw, how, guess)
+function MODEL.baseRecord(mm, source, raw, how, guess, lengthMm, axis)
+local oval = lengthMm ~= nil and lengthMm > mm + 0.01
 return { diameter = mm / MM_PER_INCH, mm = mm, source = source,
-raw = raw, how = how, guess = guess or nil }
+raw = raw, how = how, guess = guess or nil,
+shape = oval and "oval" or "round",
+length = (oval and lengthMm or mm) / MM_PER_INCH, width = mm / MM_PER_INCH,
+axis = axis == "x" and "x" or "z" }
 end
 function MODEL.footprint(b)
 if b == nil then return nil end
@@ -402,28 +407,56 @@ local x, z = tonumber(s.x or s[1]), tonumber(s.z or s[3])
 if not (x and z) or x <= 0 or z <= 0 then return nil end
 return math.min(x, z) * k
 end
-function MODEL.measureRaw(obj)
-local footprint = MODEL.footprint
-local function try(fn)
-local ok, v = pcall(fn)
-return ok and tonumber(v) or nil
+function MODEL.localSizes(X, Z, yaw)
+local c2 = math.cos(2 * math.rad(tonumber(yaw) or 0))
+local P, Q = (X / 2) ^ 2, (Z / 2) ^ 2
+if math.abs(c2) < 0.2 or math.abs(X - Z) < 1e-9 then
+local m = math.min(X, Z)
+return m, m
 end
-local d = try(function() return footprint(obj.getComponent("MeshRenderer").get("bounds")) end)
-if d then return d, "renderer" end
-d = try(function()
-local widest = nil
+local sum, dif = P + Q, (P - Q) / c2
+local ax2, az2 = (sum + dif) / 2, (sum - dif) / 2
+if az2 <= 0 or ax2 <= 0 then
+local m = math.min(X, Z)
+return m, m
+end
+return 2 * math.sqrt(ax2), 2 * math.sqrt(az2)
+end
+function MODEL.sizesOf(b, yaw)
+if b == nil then return nil end
+local s, k = b.size, 1
+if s == nil then s, k = b.extents, 2 end
+if s == nil then return nil end
+local x, z = tonumber(s.x or s[1]), tonumber(s.z or s[3])
+if not (x and z) or x <= 0 or z <= 0 then return nil end
+x, z = x * k, z * k
+if yaw then return MODEL.localSizes(x, z, yaw) end
+return x, z
+end
+function MODEL.measureRaw(obj)
+local yaw = 0
+pcall(function() yaw = tonumber(obj.getRotation().y) or 0 end)
+local function try(fn)
+local ok, x, z = pcall(fn)
+if ok and tonumber(x) and tonumber(z) then return x, z end
+end
+local x, z = try(function() return MODEL.sizesOf(obj.getComponent("MeshRenderer").get("bounds"), yaw) end)
+if x then return x, z, "renderer" end
+x, z = try(function()
+local wx, wz
 for _, c in ipairs(obj.getComponents()) do
 if tostring(c.name):find("Collider", 1, true) then
-local ok, w = pcall(function() return footprint(c.get("bounds")) end)
-if ok and w and w > (widest or 0) then widest = w end
+local ok, cx, cz = pcall(function() return MODEL.sizesOf(c.get("bounds"), yaw) end)
+if ok and cx and cx * cz > (wx and wx * wz or 0) then wx, wz = cx, cz end
 end
 end
-return widest
+return wx, wz
 end)
-if d then return d, "collider" end
-d = try(function() return footprint(obj.getBoundsNormalized()) end)
-or try(function() return footprint(obj.getBounds()) end)
-if d then return d, "bounds" end
+if x then return x, z, "collider" end
+x, z = try(function() return MODEL.sizesOf(obj.getBoundsNormalized(), nil) end)
+if x then return x, z, "bounds" end
+x, z = try(function() return MODEL.sizesOf(obj.getBounds(), yaw) end)
+if x then return x, z, "bounds" end
 end
 function MODEL.snapBase(mm)
 local near, under = nil, nil
@@ -434,20 +467,155 @@ end
 if not near or math.abs(near - mm) <= MODEL.BASE_SNAP then return near or mm, false end
 return under or near, true
 end
+function MODEL.snapOval(lenMm, widMm)
+local best, bestErr
+for _, s in ipairs(MODEL.OVAL_SIZES) do
+local err = math.max(math.abs(s[1] - lenMm), math.abs(s[2] - widMm))
+if not bestErr or err < bestErr then best, bestErr = s, err end
+end
+if not best then return nil end
+return best[1], best[2], bestErr > MODEL.BASE_SNAP
+end
 function MODEL.measureBase(obj)
-local d, how = MODEL.measureRaw(obj)
-if not d then return nil end
-local raw = d * MM_PER_INCH
-local mm, guess = MODEL.snapBase(raw)
-return MODEL.baseRecord(mm, "measured", math.floor(raw * 10 + 0.5) / 10, how, guess)
+local x, z, how = MODEL.measureRaw(obj)
+if not x then return nil end
+local xm, zm = x * MM_PER_INCH, z * MM_PER_INCH
+local lenMm, widMm = math.max(xm, zm), math.min(xm, zm)
+local axis = xm > zm and "x" or "z"
+local raw = math.floor(widMm * 10 + 0.5) / 10
+if lenMm - widMm > MODEL.BASE_SNAP then
+local L, W, guess = MODEL.snapOval(lenMm, widMm)
+if L and not guess then
+return MODEL.baseRecord(W, "measured", raw, how, false, L, axis)
+end
+if how == "renderer" then
+return MODEL.baseRecord(math.floor(widMm + 0.5), "measured", raw, how, true,
+math.floor(lenMm + 0.5), axis)
+end
+end
+local mm, guess = MODEL.snapBase(widMm)
+return MODEL.baseRecord(mm, "measured", raw, how, guess)
 end
 function MODEL.baseLine(desc)
 for raw in (tostring(desc or "") .. "\n"):gmatch("([^\n]*)\n") do
 local line = raw:gsub("\r", "")
-local bare = line:gsub("%[/?[%w%-]*%]", "")
-local n = tonumber(bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(%d+%.?%d*)%s*[Mm]?[Mm]?%s*$"))
-if n and n > 0 then return n, line end
+local bare = line:gsub("%[/?[%w%-]*%]", ""):gsub("\195\151", "x")
+local head = bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(.-)%s*$")
+if head then
+head = head:gsub("%s+[Oo][Vv][Aa][Ll]$", "")
+local a, b = head:match("^(%d+%.?%d*)%s*[Mm]?[Mm]?%s*[xX]%s*(%d+%.?%d*)%s*[Mm]?[Mm]?$")
+if not a then a, b = head:match("^(%d+%.?%d*)%s*[Mm]?[Mm]?$"), nil end
+local n1, n2 = tonumber(a), tonumber(b)
+if n1 and n1 > 0 and (n2 == nil or n2 > 0) then
+if n2 and math.abs(n1 - n2) > 0.01 then
+return math.min(n1, n2), line, math.max(n1, n2)
 end
+return n2 and math.min(n1, n2) or n1, line
+end
+end
+end
+end
+function MODEL.baseLabel(b)
+if type(b) ~= "table" then return "?" end
+local w = tonumber(b.mm) or (tonumber(b.diameter) or 0) * MM_PER_INCH
+if b.shape == "oval" and tonumber(b.length) then
+return string.format("%gx%gmm oval", math.floor(b.length * MM_PER_INCH + 0.5), math.floor(w + 0.5))
+end
+return string.format("%gmm", w)
+end
+function MODEL.axisOf(obj)
+local x, z = MODEL.measureRaw(obj)
+return (x and z and x > z + 0.01) and "x" or "z"
+end
+function MODEL.baseFromLine(obj, desc, prior)
+local w, line, l = MODEL.baseLine(desc)
+if not w then return nil end
+if not l then return MODEL.baseRecord(w, "description"), line end
+local axis = prior and prior.shape == "oval" and prior.axis
+and math.abs((tonumber(prior.width) or 0) * MM_PER_INCH - w) < 0.05
+and math.abs((tonumber(prior.length) or 0) * MM_PER_INCH - l) < 0.05 and prior.axis
+if not axis then
+local okG, guid = pcall(function() return obj.getGUID() end)
+local key = tostring(okG and guid or obj) .. ":" .. w .. "x" .. l
+MODEL.axisMemo = MODEL.axisMemo or {}
+axis = MODEL.axisMemo[key]
+if not axis then axis = MODEL.axisOf(obj); MODEL.axisMemo[key] = axis end
+end
+return MODEL.baseRecord(w, "description", nil, nil, nil, l, axis), line
+end
+function MODEL.yawOf(obj)
+local ok, r = pcall(function() return obj.getRotation() end)
+return ok and r and tonumber(r.y or r[2]) or 0
+end
+function MODEL.footprintOf(base, yaw)
+local l, w = tonumber(base and base.length), tonumber(base and (base.width or base.diameter))
+if not (l and w) or base.shape ~= "oval" or l <= w + 0.01 then return nil end
+local t = math.rad(tonumber(yaw) or 0)
+local ux, uz = math.sin(t), math.cos(t)
+if base.axis == "x" then ux, uz = math.cos(t), -math.sin(t) end
+return { length = l, width = w, ux = ux, uz = uz }
+end
+function MODEL.footprintPoly(e)
+local A, B, ux, uz = e.r, e.r, 1, 0
+if e.fp then A, B, ux, uz = e.fp.length / 2, e.fp.width / 2, e.fp.ux, e.fp.uz end
+local pts = {}
+for k = 0, 31 do
+local t = k * math.pi / 16
+local c, s = A * math.cos(t), B * math.sin(t)
+pts[#pts + 1] = { e.x + c * ux - s * uz, e.z + c * uz + s * ux }
+end
+return pts
+end
+function MODEL.footprintGap(a, b)
+local P, Q = MODEL.footprintPoly(a), MODEL.footprintPoly(b)
+local sep = -math.huge
+for _, poly in ipairs({ P, Q }) do
+for i = 1, 16 do
+local p, q = poly[i], poly[i + 1]
+local nx, nz = -(q[2] - p[2]), q[1] - p[1]
+local len = math.sqrt(nx * nx + nz * nz)
+nx, nz = nx / len, nz / len
+local pmin, pmax, qmin, qmax = math.huge, -math.huge, math.huge, -math.huge
+for k = 1, 32 do
+local dp = P[k][1] * nx + P[k][2] * nz
+local dq = Q[k][1] * nx + Q[k][2] * nz
+if dp < pmin then pmin = dp end
+if dp > pmax then pmax = dp end
+if dq < qmin then qmin = dq end
+if dq > qmax then qmax = dq end
+end
+local g = math.max(qmin - pmax, pmin - qmax)
+if g > sep then sep = g end
+end
+end
+if sep > 1e-9 then
+local best = math.huge
+local function against(A, B)
+for k = 1, 32 do
+local px, pz = A[k][1], A[k][2]
+for i = 1, 32 do
+local s, e = B[i], B[i % 32 + 1]
+local dx, dz = e[1] - s[1], e[2] - s[2]
+local t = ((px - s[1]) * dx + (pz - s[2]) * dz) / (dx * dx + dz * dz)
+t = t < 0 and 0 or (t > 1 and 1 or t)
+local ex, ez = px - (s[1] + t * dx), pz - (s[2] + t * dz)
+local d2 = ex * ex + ez * ez
+if d2 < best then best = d2 end
+end
+end
+end
+against(P, Q); against(Q, P)
+return math.sqrt(best)
+end
+local dx, dz = b.x - a.x, b.z - a.z
+local dist = math.sqrt(dx * dx + dz * dz)
+if dist < 1e-9 then dx, dz, dist = 1, 0, 0 else dx, dz = dx / dist, dz / dist end
+local ha, hb = -math.huge, -math.huge
+for k = 1, 32 do
+ha = math.max(ha, (P[k][1] - a.x) * dx + (P[k][2] - a.z) * dz)
+hb = math.max(hb, -((Q[k][1] - b.x) * dx + (Q[k][2] - b.z) * dz))
+end
+return math.min(0, dist - ha - hb)
 end
 function MODEL.height(obj)
 local okP, p = pcall(function() return obj.getPosition() end)
@@ -1020,20 +1188,24 @@ stats = stats, weapons = weapons,
 }
 end
 local function baseFor(obj, desc)
-local mm = MODEL.baseLine(desc)
-if mm then return MODEL.baseRecord(mm, "description") end
 local ok, b = callIfHas(obj, "getBase")
+local described = MODEL.baseFromLine(obj, desc, ok and type(b) == "table" and b or nil)
+if described then return described end
 if ok and type(b) == "table" and b.source == "manual" and tonumber(b.diameter) then
-return { diameter = tonumber(b.diameter),
-mm = tonumber(b.mm) or tonumber(b.diameter) * MODEL.MM_PER_INCH, source = "manual" }
+local d = tonumber(b.diameter)
+return MODEL.baseRecord(tonumber(b.mm) or d * MODEL.MM_PER_INCH, "manual", nil, nil, nil,
+b.shape == "oval" and tonumber(b.length) and b.length * MODEL.MM_PER_INCH or nil, b.axis)
 end
 return MODEL.measureBase(obj)
 end
 local function baseText(b)
 if not b then return "not measured (the card assumes its default)" end
-local t = string.format("%gmm", b.mm)
+local t = MODEL.baseLabel(b)
 if b.source ~= "measured" then return t .. " (" .. (b.source == "manual" and "set by hand" or "in description") .. ")" end
-if b.guess then return t .. string.format(" (measured %gmm -- check it)", b.raw) end
+if b.guess then
+return t .. string.format(" (GUESSED from the model's %s, narrow side %gmm -- check it; put \"Base: %s\" in its description)",
+tostring(b.how or "?"), b.raw or 0, t:gsub("%s+oval$", ""))
+end
 return t
 end
 local function luaString(s)
@@ -1202,7 +1374,7 @@ printToAll(IMPORT_PREFIX .. "No model named:", { 1, 0.7, 0.2 })
 for _, n in ipairs(notFound) do printToAll(IMPORT_PREFIX .. "    * " .. n, { 1, 0.85, 0.5 }) end
 end
 if #bases > 0 then
-printToAll(IMPORT_PREFIX .. "Bases / Heights (put \"Base: XXmm\" in descriptions before import, if it is not recognized correctly):",
+printToAll(IMPORT_PREFIX .. "Bases / Heights (put \"Base: XXmm\" (or \"Base: 90x52mm oval\") in descriptions before import, if it is not recognized correctly):",
 { 0.6, 0.85, 1 })
 for _, n in ipairs(bases) do printToAll(IMPORT_PREFIX .. "    * " .. n, { 0.8, 0.92, 1 }) end
 end
@@ -1626,6 +1798,7 @@ end
 local MODEL = {
 BASE_SIZES = { 25, 28.5, 32, 40, 50, 60 },
 BASE_SNAP = 2.5,
+OVAL_SIZES = { {60, 35}, {75, 42}, {90, 52}, {105, 70}, {120, 92}, {170, 105} },
 MM_PER_INCH = 25.4,
 LOOKS_DEFAULT = {
 background = "#1D2027",
@@ -1652,9 +1825,13 @@ local function trim(s)
 s = tostring(s or ""):gsub("^%s+", "")
 return (s:gsub("%s+$", ""))
 end
-function MODEL.baseRecord(mm, source, raw, how, guess)
+function MODEL.baseRecord(mm, source, raw, how, guess, lengthMm, axis)
+local oval = lengthMm ~= nil and lengthMm > mm + 0.01
 return { diameter = mm / MM_PER_INCH, mm = mm, source = source,
-raw = raw, how = how, guess = guess or nil }
+raw = raw, how = how, guess = guess or nil,
+shape = oval and "oval" or "round",
+length = (oval and lengthMm or mm) / MM_PER_INCH, width = mm / MM_PER_INCH,
+axis = axis == "x" and "x" or "z" }
 end
 function MODEL.footprint(b)
 if b == nil then return nil end
@@ -1665,28 +1842,56 @@ local x, z = tonumber(s.x or s[1]), tonumber(s.z or s[3])
 if not (x and z) or x <= 0 or z <= 0 then return nil end
 return math.min(x, z) * k
 end
-function MODEL.measureRaw(obj)
-local footprint = MODEL.footprint
-local function try(fn)
-local ok, v = pcall(fn)
-return ok and tonumber(v) or nil
+function MODEL.localSizes(X, Z, yaw)
+local c2 = math.cos(2 * math.rad(tonumber(yaw) or 0))
+local P, Q = (X / 2) ^ 2, (Z / 2) ^ 2
+if math.abs(c2) < 0.2 or math.abs(X - Z) < 1e-9 then
+local m = math.min(X, Z)
+return m, m
 end
-local d = try(function() return footprint(obj.getComponent("MeshRenderer").get("bounds")) end)
-if d then return d, "renderer" end
-d = try(function()
-local widest = nil
+local sum, dif = P + Q, (P - Q) / c2
+local ax2, az2 = (sum + dif) / 2, (sum - dif) / 2
+if az2 <= 0 or ax2 <= 0 then
+local m = math.min(X, Z)
+return m, m
+end
+return 2 * math.sqrt(ax2), 2 * math.sqrt(az2)
+end
+function MODEL.sizesOf(b, yaw)
+if b == nil then return nil end
+local s, k = b.size, 1
+if s == nil then s, k = b.extents, 2 end
+if s == nil then return nil end
+local x, z = tonumber(s.x or s[1]), tonumber(s.z or s[3])
+if not (x and z) or x <= 0 or z <= 0 then return nil end
+x, z = x * k, z * k
+if yaw then return MODEL.localSizes(x, z, yaw) end
+return x, z
+end
+function MODEL.measureRaw(obj)
+local yaw = 0
+pcall(function() yaw = tonumber(obj.getRotation().y) or 0 end)
+local function try(fn)
+local ok, x, z = pcall(fn)
+if ok and tonumber(x) and tonumber(z) then return x, z end
+end
+local x, z = try(function() return MODEL.sizesOf(obj.getComponent("MeshRenderer").get("bounds"), yaw) end)
+if x then return x, z, "renderer" end
+x, z = try(function()
+local wx, wz
 for _, c in ipairs(obj.getComponents()) do
 if tostring(c.name):find("Collider", 1, true) then
-local ok, w = pcall(function() return footprint(c.get("bounds")) end)
-if ok and w and w > (widest or 0) then widest = w end
+local ok, cx, cz = pcall(function() return MODEL.sizesOf(c.get("bounds"), yaw) end)
+if ok and cx and cx * cz > (wx and wx * wz or 0) then wx, wz = cx, cz end
 end
 end
-return widest
+return wx, wz
 end)
-if d then return d, "collider" end
-d = try(function() return footprint(obj.getBoundsNormalized()) end)
-or try(function() return footprint(obj.getBounds()) end)
-if d then return d, "bounds" end
+if x then return x, z, "collider" end
+x, z = try(function() return MODEL.sizesOf(obj.getBoundsNormalized(), nil) end)
+if x then return x, z, "bounds" end
+x, z = try(function() return MODEL.sizesOf(obj.getBounds(), yaw) end)
+if x then return x, z, "bounds" end
 end
 function MODEL.snapBase(mm)
 local near, under = nil, nil
@@ -1697,20 +1902,155 @@ end
 if not near or math.abs(near - mm) <= MODEL.BASE_SNAP then return near or mm, false end
 return under or near, true
 end
+function MODEL.snapOval(lenMm, widMm)
+local best, bestErr
+for _, s in ipairs(MODEL.OVAL_SIZES) do
+local err = math.max(math.abs(s[1] - lenMm), math.abs(s[2] - widMm))
+if not bestErr or err < bestErr then best, bestErr = s, err end
+end
+if not best then return nil end
+return best[1], best[2], bestErr > MODEL.BASE_SNAP
+end
 function MODEL.measureBase(obj)
-local d, how = MODEL.measureRaw(obj)
-if not d then return nil end
-local raw = d * MM_PER_INCH
-local mm, guess = MODEL.snapBase(raw)
-return MODEL.baseRecord(mm, "measured", math.floor(raw * 10 + 0.5) / 10, how, guess)
+local x, z, how = MODEL.measureRaw(obj)
+if not x then return nil end
+local xm, zm = x * MM_PER_INCH, z * MM_PER_INCH
+local lenMm, widMm = math.max(xm, zm), math.min(xm, zm)
+local axis = xm > zm and "x" or "z"
+local raw = math.floor(widMm * 10 + 0.5) / 10
+if lenMm - widMm > MODEL.BASE_SNAP then
+local L, W, guess = MODEL.snapOval(lenMm, widMm)
+if L and not guess then
+return MODEL.baseRecord(W, "measured", raw, how, false, L, axis)
+end
+if how == "renderer" then
+return MODEL.baseRecord(math.floor(widMm + 0.5), "measured", raw, how, true,
+math.floor(lenMm + 0.5), axis)
+end
+end
+local mm, guess = MODEL.snapBase(widMm)
+return MODEL.baseRecord(mm, "measured", raw, how, guess)
 end
 function MODEL.baseLine(desc)
 for raw in (tostring(desc or "") .. "\n"):gmatch("([^\n]*)\n") do
 local line = raw:gsub("\r", "")
-local bare = line:gsub("%[/?[%w%-]*%]", "")
-local n = tonumber(bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(%d+%.?%d*)%s*[Mm]?[Mm]?%s*$"))
-if n and n > 0 then return n, line end
+local bare = line:gsub("%[/?[%w%-]*%]", ""):gsub("\195\151", "x")
+local head = bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(.-)%s*$")
+if head then
+head = head:gsub("%s+[Oo][Vv][Aa][Ll]$", "")
+local a, b = head:match("^(%d+%.?%d*)%s*[Mm]?[Mm]?%s*[xX]%s*(%d+%.?%d*)%s*[Mm]?[Mm]?$")
+if not a then a, b = head:match("^(%d+%.?%d*)%s*[Mm]?[Mm]?$"), nil end
+local n1, n2 = tonumber(a), tonumber(b)
+if n1 and n1 > 0 and (n2 == nil or n2 > 0) then
+if n2 and math.abs(n1 - n2) > 0.01 then
+return math.min(n1, n2), line, math.max(n1, n2)
 end
+return n2 and math.min(n1, n2) or n1, line
+end
+end
+end
+end
+function MODEL.baseLabel(b)
+if type(b) ~= "table" then return "?" end
+local w = tonumber(b.mm) or (tonumber(b.diameter) or 0) * MM_PER_INCH
+if b.shape == "oval" and tonumber(b.length) then
+return string.format("%gx%gmm oval", math.floor(b.length * MM_PER_INCH + 0.5), math.floor(w + 0.5))
+end
+return string.format("%gmm", w)
+end
+function MODEL.axisOf(obj)
+local x, z = MODEL.measureRaw(obj)
+return (x and z and x > z + 0.01) and "x" or "z"
+end
+function MODEL.baseFromLine(obj, desc, prior)
+local w, line, l = MODEL.baseLine(desc)
+if not w then return nil end
+if not l then return MODEL.baseRecord(w, "description"), line end
+local axis = prior and prior.shape == "oval" and prior.axis
+and math.abs((tonumber(prior.width) or 0) * MM_PER_INCH - w) < 0.05
+and math.abs((tonumber(prior.length) or 0) * MM_PER_INCH - l) < 0.05 and prior.axis
+if not axis then
+local okG, guid = pcall(function() return obj.getGUID() end)
+local key = tostring(okG and guid or obj) .. ":" .. w .. "x" .. l
+MODEL.axisMemo = MODEL.axisMemo or {}
+axis = MODEL.axisMemo[key]
+if not axis then axis = MODEL.axisOf(obj); MODEL.axisMemo[key] = axis end
+end
+return MODEL.baseRecord(w, "description", nil, nil, nil, l, axis), line
+end
+function MODEL.yawOf(obj)
+local ok, r = pcall(function() return obj.getRotation() end)
+return ok and r and tonumber(r.y or r[2]) or 0
+end
+function MODEL.footprintOf(base, yaw)
+local l, w = tonumber(base and base.length), tonumber(base and (base.width or base.diameter))
+if not (l and w) or base.shape ~= "oval" or l <= w + 0.01 then return nil end
+local t = math.rad(tonumber(yaw) or 0)
+local ux, uz = math.sin(t), math.cos(t)
+if base.axis == "x" then ux, uz = math.cos(t), -math.sin(t) end
+return { length = l, width = w, ux = ux, uz = uz }
+end
+function MODEL.footprintPoly(e)
+local A, B, ux, uz = e.r, e.r, 1, 0
+if e.fp then A, B, ux, uz = e.fp.length / 2, e.fp.width / 2, e.fp.ux, e.fp.uz end
+local pts = {}
+for k = 0, 31 do
+local t = k * math.pi / 16
+local c, s = A * math.cos(t), B * math.sin(t)
+pts[#pts + 1] = { e.x + c * ux - s * uz, e.z + c * uz + s * ux }
+end
+return pts
+end
+function MODEL.footprintGap(a, b)
+local P, Q = MODEL.footprintPoly(a), MODEL.footprintPoly(b)
+local sep = -math.huge
+for _, poly in ipairs({ P, Q }) do
+for i = 1, 16 do
+local p, q = poly[i], poly[i + 1]
+local nx, nz = -(q[2] - p[2]), q[1] - p[1]
+local len = math.sqrt(nx * nx + nz * nz)
+nx, nz = nx / len, nz / len
+local pmin, pmax, qmin, qmax = math.huge, -math.huge, math.huge, -math.huge
+for k = 1, 32 do
+local dp = P[k][1] * nx + P[k][2] * nz
+local dq = Q[k][1] * nx + Q[k][2] * nz
+if dp < pmin then pmin = dp end
+if dp > pmax then pmax = dp end
+if dq < qmin then qmin = dq end
+if dq > qmax then qmax = dq end
+end
+local g = math.max(qmin - pmax, pmin - qmax)
+if g > sep then sep = g end
+end
+end
+if sep > 1e-9 then
+local best = math.huge
+local function against(A, B)
+for k = 1, 32 do
+local px, pz = A[k][1], A[k][2]
+for i = 1, 32 do
+local s, e = B[i], B[i % 32 + 1]
+local dx, dz = e[1] - s[1], e[2] - s[2]
+local t = ((px - s[1]) * dx + (pz - s[2]) * dz) / (dx * dx + dz * dz)
+t = t < 0 and 0 or (t > 1 and 1 or t)
+local ex, ez = px - (s[1] + t * dx), pz - (s[2] + t * dz)
+local d2 = ex * ex + ez * ez
+if d2 < best then best = d2 end
+end
+end
+end
+against(P, Q); against(Q, P)
+return math.sqrt(best)
+end
+local dx, dz = b.x - a.x, b.z - a.z
+local dist = math.sqrt(dx * dx + dz * dz)
+if dist < 1e-9 then dx, dz, dist = 1, 0, 0 else dx, dz = dx / dist, dz / dist end
+local ha, hb = -math.huge, -math.huge
+for k = 1, 32 do
+ha = math.max(ha, (P[k][1] - a.x) * dx + (P[k][2] - a.z) * dz)
+hb = math.max(hb, -((Q[k][1] - b.x) * dx + (Q[k][2] - b.z) * dz))
+end
+return math.min(0, dist - ha - hb)
 end
 function MODEL.height(obj)
 local okP, p = pcall(function() return obj.getPosition() end)
@@ -2373,6 +2713,7 @@ nerveOutNone = { "pet" },
 nerveOutFoes = false,
 groupRange = 3,
 preMeasure = false,
+baseOutlines = false,
 agility = 4,
 escherGang = { type = "House Escher", agility = "ones",
 unless = { "Chaos Corrupted", "Genestealer Corrupted", "Genestealer Infected",
@@ -8656,6 +8997,10 @@ if type(t) ~= "table" then return nil end
 local d = tonumber(t.diameter)
 if not d or d <= 0 then return nil end
 t.diameter, t.mm = d, tonumber(t.mm) or d * MODEL.MM_PER_INCH
+local l = tonumber(t.length)
+if t.shape ~= "oval" or not l or l < d then t.shape, l = "round", d end
+t.length, t.width = l, d
+t.axis = t.axis == "x" and "x" or "z"
 return t
 end
 local engage = { token = 0, spot = nil, pending = false }
@@ -8671,16 +9016,53 @@ local ok, same = pcall(function() return obj.getGUID() == self.getGUID() end)
 return ok and same == true
 end
 local function baseGap(a, b)
+if a.fp or b.fp then return MODEL.footprintGap(a, b) end
 return math.sqrt((a.x - b.x) ^ 2 + (a.z - b.z) ^ 2) - a.r - b.r
 end
 local currentBase, runEngagement
 do
 function currentBase()
 local ok, desc = pcall(function() return self.getDescription() end)
-local mm = ok and MODEL.baseLine(desc)
-if mm then return MODEL.baseRecord(mm, "description") end
+local base = ok and MODEL.baseFromLine(self, desc, validBase(fighter.base))
+if not base then
 if not validBase(fighter.base) then fighter.base = MODEL.measureBase(self) end
-return fighter.base or MODEL.baseRecord(CFG.baseDefault, "default")
+base = fighter.base or MODEL.baseRecord(CFG.baseDefault, "default")
+end
+__nqs_mundane_bus.baseChanged(base)
+return base
+end
+local OUTLINE_COLOR, OUTLINE_THICK, OUTLINE_LIFT = { 1, 0.85, 0.3 }, 0.04, 0.05
+function ACTIVATION.drawOutline(base)
+base = base or currentBase()
+local function ours(line)
+local c = type(line) == "table" and line.color
+local t = type(line) == "table" and tonumber(line.thickness)
+if type(c) ~= "table" or not t then return false end
+for i, key in ipairs({ "r", "g", "b" }) do
+if math.abs((tonumber(c[i] or c[key]) or -1) - OUTLINE_COLOR[i]) > 0.002 then return false end
+end
+return math.abs(t - OUTLINE_THICK) < 0.0005
+end
+local okG, existing = pcall(function() return self.getVectorLines() end)
+local lines = {}
+for _, line in ipairs(okG and type(existing) == "table" and existing or {}) do
+if not ours(line) then lines[#lines + 1] = line end
+end
+if CFG.baseOutlines and type(base) == "table" then
+local okS, sc = pcall(function() return self.getScale() end)
+local function axis(k, i) return math.max(0.01, math.abs(okS and sc and tonumber(sc[k] or sc[i]) or 1)) end
+local sx, sy, sz = axis("x", 1), axis("y", 2), axis("z", 3)
+local A, B = (tonumber(base.length) or base.diameter) / 2, (tonumber(base.width) or base.diameter) / 2
+if base.axis ~= "x" then A, B = B, A end
+local pts = {}
+for k = 0, 48 do
+local t = k * math.pi / 24
+pts[#pts + 1] = { A * math.cos(t) / sx, OUTLINE_LIFT / sy, B * math.sin(t) / sz }
+end
+lines[#lines + 1] = { points = pts, color = { OUTLINE_COLOR[1], OUTLINE_COLOR[2], OUTLINE_COLOR[3] },
+thickness = OUTLINE_THICK, rotation = { 0, 0, 0 } }
+end
+pcall(function() self.setVectorLines(lines) end)
 end
 local gangOf = ui.gangOf
 local function inReach(a, b)
@@ -8708,14 +9090,17 @@ if not info then
 local okF, f = ACTIVATION.ask(obj, "getFighter")
 if okF and type(f) == "table" and f.status then
 local b = validBase(f.base) or MODEL.measureBase(obj) or MODEL.baseRecord(CFG.baseDefault, "default")
-info = { name = f.name, status = f.status, diameter = b.diameter, rank = f.rank, old = true }
+info = { name = f.name, status = f.status, diameter = b.diameter, rank = f.rank, old = true,
+shape = b.shape, length = b.length, axis = b.axis }
 end
 end
 end
 if not (info and info.status) or info.out then return nil end
 local d = tonumber(info.diameter) or CFG.baseDefault / MODEL.MM_PER_INCH
+local fp = MODEL.footprintOf({ shape = info.shape, length = info.length, width = d, axis = info.axis },
+MODEL.yawOf(obj))
 return { obj = obj, self = me, old = info.old == true, gang = gang, team = team, name = tostring(info.name or "?"),
-status = info.status, r = d / 2, x = pos.x, y = pos.y, z = pos.z,
+status = info.status, r = d / 2, fp = fp, x = pos.x, y = pos.y, z = pos.z,
 rank = info.rank, cl = tonumber(info.cl), t = tonumber(info.t), s = tonumber(info.s),
 activation = info.activation, master = info.master == true,
 fearsome = info.fearsome == true, ironJaw = tonumber(info.ironJaw),
@@ -8933,7 +9318,9 @@ local reach, spots = nil, nil
 if tonumber(o.within) then
 local big = 0
 for _, mm in ipairs(MODEL.BASE_SIZES) do big = math.max(big, tonumber(mm) or 0) end
-big = math.max(big / MODEL.MM_PER_INCH, tonumber(currentBase().diameter) or 0)
+for _, ov in ipairs(MODEL.OVAL_SIZES) do big = math.max(big, ov[1]) end
+big = math.max(big / MODEL.MM_PER_INCH, tonumber(currentBase().length) or 0,
+tonumber(currentBase().diameter) or 0)
 local hops = tonumber(o.hops) or 1
 reach = hops * (tonumber(o.within) + CFG.engageSlack + big) + 1
 spots = { positionOf(self) }
@@ -9112,7 +9499,7 @@ local all, me = ACTIVATION.everyone({ within = range })
 me = me or tableEntry(self)
 local out = {}
 for _, o in ipairs(me and all or {}) do
-if not o.self and friends(o, me) and baseGap(me, o) + 2 * o.r <= range + CFG.engageSlack then
+if not o.self and friends(o, me) and baseGap(me, o) + 2 * (o.fp and o.fp.length / 2 or o.r) <= range + CFG.engageSlack then
 out[#out + 1] = o
 end
 end
@@ -9421,7 +9808,7 @@ end
 all[#all + 1] = me
 extra = me
 end
-local was = engage.spot and { x = engage.spot.x, y = engage.spot.y, z = engage.spot.z, r = me.r }
+local was = engage.spot and { x = engage.spot.x, y = engage.spot.y, z = engage.spot.z, r = me.r, fp = me.fp }
 local affected = nil
 local function findAffected()
 affected = { me }
@@ -10089,16 +10476,34 @@ local i = indexOf(STATUSES, fighter.status) or 1
 return setStatus(STATUSES[i % #STATUSES + 1].key)
 end
 function getBase() return currentBase() end
+function getFootprint()
+local b, pos = currentBase(), positionOf(self)
+if not pos then return nil end
+local fp = MODEL.footprintOf(b, MODEL.yawOf(self))
+local yaw = 0
+if fp then yaw = math.deg((math.atan2 or math.atan)(fp.uz, fp.ux)) % 180 end
+return { shape = b.shape, length = b.length, width = b.width, yaw = yaw, x = pos.x, z = pos.z }
+end
 function setBase(v)
+local len, axis
 if type(v) == "table" then
+len, axis = tonumber(v.length), v.axis
 if v.mm == nil and v.value == nil and tonumber(v.diameter) then
 v = tonumber(v.diameter) * MODEL.MM_PER_INCH
 else
 v = v.mm or v.value
 end
 end
-local mm = tonumber(v) or tonumber(tostring(v or ""):match("^%s*(%d+%.?%d*)%s*[Mm]?[Mm]?%s*$"))
-fighter.base = (mm and mm > 0) and MODEL.baseRecord(mm, "manual") or MODEL.measureBase(self)
+local mm = tonumber(v)
+if not mm and v ~= nil then
+local _line
+mm, _line, len = MODEL.baseLine("Base: " .. tostring(v))
+end
+if mm and mm > 0 then
+fighter.base = MODEL.baseRecord(mm, "manual", nil, nil, nil, len, axis or (len and MODEL.axisOf(self)))
+else
+fighter.base = MODEL.measureBase(self)
+end
 return currentBase()
 end
 function getHeight()
@@ -10141,7 +10546,9 @@ if isSelf(other) then ob = currentBase() else
 local ok, v = ACTIVATION.ask(other, "getBase")
 ob = (ok and validBase(v)) or MODEL.measureBase(other) or MODEL.baseRecord(CFG.baseDefault, "default")
 end
-a.r, b.r = currentBase().diameter / 2, ob.diameter / 2
+local mine = currentBase()
+a.r, b.r = mine.diameter / 2, ob.diameter / 2
+a.fp, b.fp = MODEL.footprintOf(mine, MODEL.yawOf(self)), MODEL.footprintOf(validBase(ob), MODEL.yawOf(other))
 return baseGap(a, b)
 end
 function engageInfo()
@@ -10157,7 +10564,9 @@ local cacophony, void = ACTIVATION.liveField("rerollHits"), ACTIVATION.liveField
 local immune = ACTIVATION.immunity()
 local cloak, soul = SKILL.with("refraction")[1], SKILL.with("voidSoul")[1]
 local agMod, agRr = ACTIVATION.agilityMod(), ACTIVATION.agilityReroll()
-return { name = fighter.name, status = fighter.status, diameter = currentBase().diameter,
+local base = currentBase()
+return { name = fighter.name, status = fighter.status, diameter = base.diameter,
+shape = base.shape, length = base.length, axis = base.axis,
 ironWill = will > 0 and will or nil, wyrd = wil and true or nil, wil = wil,
 assist = assist > 0 and assist or nil, assistWith = assist > 0 and table.concat(kits, ", ") or nil,
 out = fighter.outOfAction == true or nil, activation = fighter.activation,
@@ -15170,6 +15579,7 @@ if not RULES.use(RULES.fetch()) then return false end
 if RULES.same(before, rest()) then return true end
 SKILL.arm(fighter)
 if ui.built then ui.why = "rules"; refresh() end
+ACTIVATION.drawOutline()
 return true
 end
 __nqs_mundane_bus.card = { setFighter = setFighter }
@@ -15403,8 +15813,26 @@ fighter = fighter and fighter.name or nil,
 field = field, key = tostring(key), from = from, to = to,
 })
 end
+function __nqs_mundane_bus.baseChanged(base)
+local card = __nqs_mundane_bus.card
+if not card or type(base) ~= "table" then return end
+local sig = string.format("%s|%.4f|%.4f|%s", tostring(base.shape), tonumber(base.length) or 0,
+tonumber(base.width) or 0, tostring(base.axis))
+local label = MODEL.baseLabel(base)
+local was, wasLabel = card.baseSig, card.baseLabel
+card.baseSig, card.baseLabel = sig, label
+if was ~= sig and ACTIVATION.drawOutline then ACTIVATION.drawOutline(base) end
+if was == nil or was == sig then return end
+__nqs_mundane_bus.emit({
+kind = "state_change", action = "base",
+fighter = fighter and fighter.name or nil,
+field = "base", from = wasLabel, to = label,
+shape = base.shape, length = base.length, width = base.width, axis = base.axis,
+})
+end
 function setFighter(data)
 local done = __nqs_mundane_bus.card.setFighter(data)
+__nqs_mundane_bus.card.baseSig = nil
 __nqs_mundane_bus.card.hp = fighter.wounds.current
 __nqs_mundane_bus.card.actionsLeft = fighter.actionsLeft
 __nqs_mundane_bus.card.readyKey = nil
