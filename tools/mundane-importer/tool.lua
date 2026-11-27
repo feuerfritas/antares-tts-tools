@@ -16162,7 +16162,9 @@ local P = prefix and PANELS[prefix]
 if not P then return nil end
 local out = {}
 for _, a in ipairs(P.list or {}) do
-local ok, _, label, ink, dim = pcall(actionState, a)
+-- The panel's own state function (actionState, which is local to an
+-- earlier block and not visible here): on, label, type ink, dimmed.
+local ok, _, label, ink, dim = pcall(P.state, a)
 local okC, cost = pcall(SKILL.costOf, a)
 out[#out + 1] = { key = MPANEL.actionKey(a), label = ok and tostring(label or a.label or a.key) or tostring(a.key),
 dim = ok and dim == true or nil, ink = ok and type(ink) == "string" and ink or nil,
