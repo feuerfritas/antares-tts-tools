@@ -14854,6 +14854,41 @@ if kind == "weapon" then
 onTriggerClick(player, v, color .. "_btnWeapon_" .. tostring(tonumber(args.weapon) or 0))
 return true
 end
+-- A weapon profile's controls (S8-I3 step 4). The card's popup does a set-up
+-- when it opens (openedFlyout: attack count, Rapid Fire or ATK, combi or extra
+-- ammo, aim, support) and resets aim, reroll and the measure when it closes.
+-- The panel has no popup, so the card opens the weapon for this player before
+-- the first control on it, and closes it again shortly after an attack -- what
+-- a player does on the card: open, set up, ATK, leave. Without the open, an
+-- attack fires with whatever count it had last (INT-1 run 4).
+-- tag: patk (left attack, right Rapid Fire, middle aim), pammo (left/right
+-- ammo state, middle reload), pcnt (attack count), phit (Hit +/-, middle
+-- reroll), padj (a profile column +/-, col = its index), prelBtn (Reliable).
+if kind == "profile" then
+local tag, i, pi = tostring(args.tag or ""), tonumber(args.weapon), tonumber(args.profile)
+local handler = ({ patk = onProfileButton, pammo = onProfileButton, pcnt = onProfileButton,
+phit = onHitClick, padj = onProfileStatClick, prelBtn = onReliableClick })[tag]
+if not (handler and i and pi and weaponAt(i)) then return false end
+MPANEL.open = MPANEL.open or {}
+if MPANEL.open[color] ~= i then
+ui.showFlyout("pop_" .. i, color)
+MPANEL.open[color] = i
+end
+local id = tag == "phit" and ("phit_" .. i .. "_" .. pi)
+or tag == "padj" and ("padj_" .. i .. "_" .. pi .. "_" .. tostring(tonumber(args.col) or 0))
+or tag == "prelBtn" and ("prelBtn_" .. i .. "_" .. pi)
+or (tag .. "_" .. i .. "_" .. pi)
+handler(player, v, color .. "_" .. id)
+if tag == "patk" and v == "-1" then
+Wait.time(function()
+if MPANEL.open[color] == i then
+MPANEL.open[color] = nil
+ui.showFlyout(nil, color)
+end
+end, tonumber(CFG.panelAttackLinger) or 1.5)
+end
+return true
+end
 -- An action, by its panel and key. The index the card's own ids use is found
 -- now, so a list that changed since the host drew it cannot misfire.
 if kind == "action" then
@@ -14911,6 +14946,12 @@ local okPr, pr = pcall(MPANEL.prompt)
 if okPr then s.prompt = pr end
 local okA, acts = pcall(MPANEL.actions)
 if okA then s.actions = acts end
+local okPC, cols = pcall(function()
+local out = {}
+for ci, c in ipairs(PROFILE_COLS) do out[ci] = c.key end
+return out
+end)
+s.profileCols = okPC and cols or { "Hit", "SR", "LR", "S", "AP", "L", "D", "Am" }
 s.statuses = {}
 for _, st2 in ipairs(STATUSES) do s.statuses[#s.statuses + 1] = { key = st2.key, short = st2.short, color = st2.color } end
 local keys, seen = {}, {}
@@ -14943,7 +14984,23 @@ if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then out[k
 end
 profiles[#profiles + 1] = out
 end
-s.weapons[#s.weapons + 1] = { index = i, name = w.name or "", profiles = profiles }
+local R = TRAIT_RULES
+for pi, p in ipairs(w.profiles or {}) do
+local out = profiles[pi]
+if out then
+local okA, st = pcall(R.ammoState, w, p)
+out.ammoState = okA and st or nil
+local okR, rel = pcall(R.reliable, p)
+out.reliable = okR and rel or nil
+out.reliableUsed = p.reliableUsed == true or nil
+end
+end
+local okH, hit = pcall(R.hit, w)
+local okL, role = pcall(R.roleLabel, w)
+local okG, glow = pcall(R.glow, w)
+s.weapons[#s.weapons + 1] = { index = i, name = w.name or "", profiles = profiles,
+hit = okH and hit or nil, role = okL and role or nil, glow = okG and glow or nil,
+aiming = R.aiming and R.aiming[w] == true or nil, reroll = R.reroll and R.reroll[w] or nil }
 end
 end
 return JSON.encode(s)
