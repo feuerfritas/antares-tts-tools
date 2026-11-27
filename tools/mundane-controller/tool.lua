@@ -2147,6 +2147,23 @@ local list = TEAM.playing()
 return list and { colors = list } or { all = true }
 end
 function getPlaying() return TEAM.playingMsg() end
+-- Which gangs play on which side, and who plays them: for a host that shows a
+-- player their own fighters apart from the other side's (S8). JSON-encoded here,
+-- since another script cannot encode a table this one owns. Gang names are the
+-- BOTTLE.key form (trimmed, lower case) of the card's "Mundane Gang_" tag.
+function getSides()
+local sides = {}
+for n = 1, 2 do
+local gangs, colors, seen = {}, {}, {}
+for _, e in ipairs(TEAM.gangs[n] or {}) do
+if e.gang then gangs[#gangs + 1] = BOTTLE.key(e.gang) end
+local c = TEAM.colorOf(e)
+if c and not seen[c] then seen[c], colors[#colors + 1] = true, c end
+end
+sides[n] = { gangs = gangs, colors = colors }
+end
+return JSON.encode({ sides = sides })
+end
 function TEAM.seated()
 local ok, players = pcall(function() return Player.getPlayers() end)
 for _, p in ipairs(ok and type(players) == "table" and players or {}) do

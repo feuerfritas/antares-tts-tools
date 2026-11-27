@@ -14640,8 +14640,9 @@ end
 -- the Mundane panel API (it sets MUNDANE_PANEL_API), the card registers with it.
 -- If the host turns panel mode on, the full card leaves the model, which keeps
 -- only its compact tag (name and wounds), and the host draws the fighter in its
--- own screen panels from getPanelState(). While the host shows this card, every
--- redraw marks it changed, at most once a frame, and the host pulls the state.
+-- own screen panels from getPanelState(). In panel mode every redraw marks the
+-- card changed, at most once a frame, and the host pulls the state: its list
+-- shows every fighter's wounds, not only the ones a panel shows.
 -- Without a host none of this runs and the card is exactly as before.
 -- A global table, not locals: this chunk is close to Lua's 200-local limit.
 MPANEL = { on = false, shown = false, queued = false, registered = false }
@@ -14661,11 +14662,11 @@ MPANEL.registered = false
 pcall(function() Global.call("mundaneDeregister", { guid = self.getGUID() }) end)
 end
 function MPANEL.touch()
-if not (MPANEL.on and MPANEL.shown) or MPANEL.queued then return end
+if not MPANEL.on or MPANEL.queued then return end
 MPANEL.queued = true
 Wait.frames(function()
 MPANEL.queued = false
-if MPANEL.on and MPANEL.shown then
+if MPANEL.on then
 pcall(function() Global.call("mundanePanelChanged", { guid = self.getGUID() }) end)
 end
 end, 1)
@@ -14697,6 +14698,9 @@ end
 ui.drawArrows()
 end
 function isPanelMode() return MPANEL.on end
+-- The host calls this after its own load, so cards that loaded before it are
+-- registered all the same.
+function panelRegister() MPANEL.register() return MPANEL.registered end
 function panelShown(args)
 MPANEL.shown = MPANEL.flag(args, "shown")
 if MPANEL.shown then
