@@ -15993,6 +15993,69 @@ pcall(function() Global.call("mundanePanelChanged", { guid = self.getGUID() }) e
 end
 return MPANEL.shown
 end
+-- Dice (S8-I3 item 4). The card shows a roll for CFG.diceShow seconds and clears
+-- it, so the host keeps its own copy: every roll the card shows is turned into
+-- display-ready data here (labels and inks as the card's own dice draw them)
+-- and numbered, and the host shows it until this fighter's next roll.
+MPANEL.rollSeq = 0
+function MPANEL.dieOf(kind, v, hl, spared)
+local f = ACTIVATION.face(kind, v, 10, hl, spared)
+local label = f.num
+if kind == "injury" then
+label = ACTIVATION.STAND_IN[ACTIVATION.INJURY_DICE[clamp(math.floor(tonumber(v) or 1), 1, 6)] or "serious"]
+or tostring(v)
+end
+if f.icon == "dice_ammo" or f.mark then label = (label or tostring(v)) .. "!" end
+return { label = label or tostring(v), kind = kind, ink = f.numInk or f.iconInk or f.ink, fill = f.fill }
+end
+function MPANEL.rolled(r)
+if not MPANEL.on or type(r) ~= "table" then return end
+local ok, snap = pcall(function()
+local s = { title = r.title and tostring(r.title) or nil, rolling = r.rolling == true or nil }
+if not r.rolling then
+s.dice = {}
+for i, v in ipairs(r.faces or {}) do
+if i > ACTIVATION.MAX_SHOWN then break end
+local kind = (r.kinds and r.kinds[i]) or r.kind or "d6"
+local d = MPANEL.dieOf(kind, v, r.hls and r.hls[i] or r.hl, r.spare)
+local tags = {}
+for _, k in ipairs(type(r.tags) == "table" and type(r.tags[i]) == "table" and r.tags[i] or {}) do
+local e = ACTIVATION.effect(k)
+tags[#tags + 1] = e and e.short or tostring(k)
+end
+if #tags > 0 then d.tags = table.concat(tags, " ") end
+if type(r.half) == "table" and r.half[i] then d.half = true end
+s.dice[#s.dice + 1] = d
+end
+if r.result then
+s.sum, s.sumInk = ACTIVATION.STAND_IN[r.result] or tostring(r.result), ACTIVATION.injuryInk(r.result)
+elseif r.sum then
+s.sum, s.sumInk = tostring(r.sum), r.sumInk
+end
+if r.ammoState then s.ammo = tostring(r.ammoState):upper() end
+if r.lead then s.lead, s.leadInk = tostring(r.lead), r.leadInk end
+if type(r.lines) == "table" then
+s.lines = {}
+for k, l in ipairs(r.lines) do if k <= 2 then s.lines[k] = tostring(l) end end
+end
+end
+return s
+end)
+if not ok then return end
+MPANEL.rollSeq = MPANEL.rollSeq + 1
+snap.seq = MPANEL.rollSeq
+MPANEL.roll = snap
+MPANEL.touch()
+end
+MPANEL.baseShowDice, MPANEL.baseRolling = ACTIVATION.showDice, ACTIVATION.rolling
+function ACTIVATION.showDice(roll)
+MPANEL.baseShowDice(roll)
+MPANEL.rolled(roll)
+end
+function ACTIVATION.rolling(title, mod, modInk)
+MPANEL.baseRolling(title, mod, modInk)
+MPANEL.rolled(ACTIVATION.roll)
+end
 -- Everything the host's view shows, as the card itself would show it, encoded
 -- here: another script cannot encode a table this script owns.
 function getPanelState()
@@ -16005,7 +16068,7 @@ wounds = { current = tonumber((f.wounds or {}).current) or 0, max = ui.hpMax() }
 status = { key = st.key, label = st.label, short = st.short, color = st.color },
 activation = f.activation, actionsLeft = f.actionsLeft, readyMarks = f.readyMarks,
 outOfAction = f.outOfAction == true, stats = {}, conditions = {}, weapons = {},
-skills = getSkills(), wargear = getWargear(),
+skills = getSkills(), wargear = getWargear(), roll = MPANEL.roll,
 }
 local keys, seen = {}, {}
 for _, order in ipairs({ CFG.statOrder, STAT.hoverOrder() }) do
