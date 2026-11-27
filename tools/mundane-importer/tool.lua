@@ -16042,7 +16042,10 @@ end
 end
 return JSON.encode(s)
 end
-function onDestroy() MPANEL.deregister() end
+-- No onDestroy deregister: a Global.call made while the table is being torn
+-- down (loading another save) raises an error in chat that pcall cannot catch.
+-- The host notices a card that has gone. mundaneDeregister stays for a card
+-- that leaves panel mode on purpose.
 function onSave()
 return JSON.encode({
 fighter = fighter,
