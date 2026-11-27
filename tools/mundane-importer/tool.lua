@@ -2591,7 +2591,7 @@ rawTexts = {},
 local function view(key)
 local v = ui.view[key]
 if not v then
-v = { hoverToken = 0, statsHover = false, yaw = CFG.yaw }
+v = { hoverToken = 0, statsHover = false, yaw = CFG.yaw, compact = MPANEL and MPANEL.on or nil }
 ui.view[key] = v
 end
 return v
@@ -6696,6 +6696,7 @@ local c = full .. "|" .. name
 if sent[c] == value then return end
 sent[c] = value
 if not seeding then self.UI.setAttribute(full, name, value) end
+if MPANEL then MPANEL.touch() end
 end
 local function setText(id, text, key)
 if not ui.built then return end
@@ -6710,6 +6711,7 @@ local c = full .. "|#text"
 if sent[c] == text then return end
 sent[c] = text
 if not seeding then self.UI.setValue(full, text) end
+if MPANEL then MPANEL.touch() end
 end
 local function setTextSize(id, size, w, h, key)
 local t = textSize(size, w, h)
@@ -7092,7 +7094,7 @@ end
 end
 function ui.drawArrows(key)
 for _, k in ipairs(key and { key } or ui.viewers) do
-setAttr("nameArrows", "active", view(k).nameHover == true, k)
+setAttr("nameArrows", "active", view(k).nameHover == true and not (MPANEL and MPANEL.on), k)
 end
 end
 function ACTIVATION.drawDice()
@@ -8036,6 +8038,7 @@ function onNameClick(player, value, id)
 if ui.spectating(player, true) then return end
 local key = viewerOf(id)
 if tostring(value) ~= "-2" then return end
+if MPANEL and MPANEL.on then return end
 ui.setCompact(key, not view(key).compact)
 end
 function onNameEnter(player, value, id)
@@ -14633,6 +14636,124 @@ end
 function checkLineOfSight(targetObject)
 return nil
 end
+-- Panel mode (S8, feature/card-panels). When the table's Global script offers
+-- the Mundane panel API (it sets MUNDANE_PANEL_API), the card registers with it.
+-- If the host turns panel mode on, the full card leaves the model, which keeps
+-- only its compact tag (name and wounds), and the host draws the fighter in its
+-- own screen panels from getPanelState(). While the host shows this card, every
+-- redraw marks it changed, at most once a frame, and the host pulls the state.
+-- Without a host none of this runs and the card is exactly as before.
+-- A global table, not locals: this chunk is close to Lua's 200-local limit.
+MPANEL = { on = false, shown = false, queued = false, registered = false }
+function MPANEL.host()
+local ok, v = pcall(function() return Global.getVar("MUNDANE_PANEL_API") end)
+return ok and v ~= nil
+end
+function MPANEL.register()
+if not (type(fighter) == "table" and fighter.name) or not MPANEL.host() then return end
+local ok, on = pcall(function() return Global.call("mundaneRegister", { guid = self.getGUID() }) end)
+MPANEL.registered = ok == true
+if ok then setPanelMode({ on = on == true }) end
+end
+function MPANEL.deregister()
+if not MPANEL.registered then return end
+MPANEL.registered = false
+pcall(function() Global.call("mundaneDeregister", { guid = self.getGUID() }) end)
+end
+function MPANEL.touch()
+if not (MPANEL.on and MPANEL.shown) or MPANEL.queued then return end
+MPANEL.queued = true
+Wait.frames(function()
+MPANEL.queued = false
+if MPANEL.on and MPANEL.shown then
+pcall(function() Global.call("mundanePanelChanged", { guid = self.getGUID() }) end)
+end
+end, 1)
+end
+-- obj.call passes its table as the single argument, so every entry point here
+-- takes { on = ... } / { shown = ... } and also accepts a bare boolean.
+function MPANEL.flag(args, field)
+if type(args) == "table" then return args[field] == true or args[1] == true end
+return args == true
+end
+function setPanelMode(args)
+local on = MPANEL.flag(args, "on")
+if MPANEL.on == on then return on end
+MPANEL.on = on
+MPANEL.apply()
+MPANEL.touch()
+return on
+end
+-- A view made after this is compact from the start (view()), and a build bakes
+-- it in. A card already built is switched once its XML has loaded: setAttr on
+-- elements still loading reaches nothing, and its cache would then skip them.
+function MPANEL.apply()
+if not ui.built then return end
+local ok, loading = pcall(function() return self.UI.loading end)
+if ok and loading then Wait.frames(MPANEL.apply, 5) return end
+for _, k in ipairs(ui.viewers) do
+if (view(k).compact == true) ~= MPANEL.on then ui.setCompact(k, MPANEL.on) end
+end
+ui.drawArrows()
+end
+function isPanelMode() return MPANEL.on end
+function panelShown(args)
+MPANEL.shown = MPANEL.flag(args, "shown")
+if MPANEL.shown then
+pcall(function() Global.call("mundanePanelChanged", { guid = self.getGUID() }) end)
+end
+return MPANEL.shown
+end
+-- Everything the host's view shows, as the card itself would show it, encoded
+-- here: another script cannot encode a table this script owns.
+function getPanelState()
+local f = type(fighter) == "table" and fighter or {}
+local st = statusDef(f.status)
+local s = {
+v = 1, guid = self.getGUID(), name = f.name or "", rank = f.rank or "", type = f.ftype or "",
+gang = f.gang or "", gangType = f.gangType or "", category = f.category or "",
+wounds = { current = tonumber((f.wounds or {}).current) or 0, max = ui.hpMax() },
+status = { key = st.key, label = st.label, short = st.short, color = st.color },
+activation = f.activation, actionsLeft = f.actionsLeft, readyMarks = f.readyMarks,
+outOfAction = f.outOfAction == true, stats = {}, conditions = {}, weapons = {},
+skills = getSkills(), wargear = getWargear(),
+}
+local keys, seen = {}, {}
+for _, order in ipairs({ CFG.statOrder, STAT.hoverOrder() }) do
+for _, key in ipairs(order) do
+if not seen[key] then seen[key], keys[#keys + 1] = true, key end
+end
+end
+for _, key in ipairs(keys) do
+local ok, text, color = pcall(function()
+if key == "Inv" then return STAT.inv() .. "+", COL.value end
+return statText(key, nil), statColor(key, nil)
+end)
+s.stats[#s.stats + 1] = { key = key, text = ok and tostring(text) or "-", color = ok and color or nil }
+end
+for _, c in ipairs(CONDITIONS) do
+local ok, n = pcall(conditionCount, c.key)
+if ok and (tonumber(n) or 0) > 0 then
+s.conditions[#s.conditions + 1] = { key = c.key, label = c.label or c.key, n = tonumber(n) }
+end
+end
+for i = 1, weaponCount() do
+local w = weaponAt(i)
+if w then
+local profiles = {}
+for _, p in ipairs(w.profiles or {}) do
+local out = {}
+for k, v in pairs(p) do
+if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then out[k] = v end
+end
+profiles[#profiles + 1] = out
+end
+s.weapons[#s.weapons + 1] = { index = i, name = w.name or "", profiles = profiles }
+end
+end
+return JSON.encode(s)
+end
+function onDestroy() MPANEL.deregister() end
 function onSave()
 return JSON.encode({
 fighter = fighter,
@@ -14664,6 +14785,7 @@ setFighter(data)
 currentBase()
 engage.spot = positionOf(self)
 ACTIVATION.powerMark()
+MPANEL.register()
 end, 1)
 if wait > 0 then
 Wait.time(function()
