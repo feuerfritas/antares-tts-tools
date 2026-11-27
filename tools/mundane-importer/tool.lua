@@ -16114,13 +16114,64 @@ if type(args) ~= "table" then return false end
 local kind, color = tostring(args.kind or ""), tostring(args.player or "")
 local okP, player = pcall(function() return Player[color] end)
 if not (okP and player) then return false end
+local v = tostring(args.v or "-1")
 if kind == "prompt" then
 local fn = MPANEL.PROMPT[tostring(args.b or "")]
 if not fn then return false end
-fn(player, tostring(args.v or "-1"), color .. "_" .. tostring(args.b))
+fn(player, v, color .. "_" .. tostring(args.b))
 return true
 end
+-- The status button: left activates a ready fighter or finishes an active one,
+-- right toggles ready -- onTriggerClick on btnStatus, as the card's own button.
+if kind == "status" then
+onTriggerClick(player, v, color .. "_btnStatus")
+return true
+end
+if kind == "setStatus" then
+onPickStatus(player, "-1", color .. "_statusOpt_" .. tostring(args.key or ""))
+return true
+end
+-- A weapon's diamond: switch its role, or use a flamer's template.
+if kind == "weapon" then
+onTriggerClick(player, v, color .. "_btnWeapon_" .. tostring(tonumber(args.weapon) or 0))
+return true
+end
+-- An action, by its panel and key. The index the card's own ids use is found
+-- now, so a list that changed since the host drew it cannot misfire.
+if kind == "action" then
+local prefix, key = tostring(args.prefix or ""), tostring(args.key or "")
+if prefix ~= ui.actionPanelOf(fighter.status) and prefix ~= SKILL.special() then return false end
+local P = PANELS[prefix]
+for k, a in ipairs(P and P.list or {}) do
+if MPANEL.actionKey(a) == key then
+onChooseAction(player, "-1", color .. "_" .. prefix .. "_" .. k)
+return true
+end
+end
 return false
+end
+return false
+end
+function MPANEL.actionKey(a) return a.key or ("roll:" .. tostring(a.roll)) end
+-- The action lists the card would show: the current status's, and the Special
+-- tab's (skills, wargear, Wyrd powers and the rolls), each entry with its label,
+-- cost and dimming as the card draws them.
+function MPANEL.actions()
+local function list(prefix)
+local P = prefix and PANELS[prefix]
+if not P then return nil end
+local out = {}
+for _, a in ipairs(P.list or {}) do
+local ok, _, label, ink, dim = pcall(actionState, a)
+local okC, cost = pcall(SKILL.costOf, a)
+out[#out + 1] = { key = MPANEL.actionKey(a), label = ok and tostring(label or a.label or a.key) or tostring(a.key),
+dim = ok and dim == true or nil, ink = ok and type(ink) == "string" and ink or nil,
+cost = okC and cost and tostring(cost) or nil }
+end
+return { prefix = prefix, list = out }
+end
+local okS, sp = pcall(SKILL.special)
+return { status = list(ui.actionPanelOf(fighter.status)), special = okS and list(sp) or nil }
 end
 -- Everything the host's view shows, as the card itself would show it, encoded
 -- here: another script cannot encode a table this script owns.
@@ -16138,6 +16189,10 @@ skills = getSkills(), wargear = getWargear(), roll = MPANEL.roll,
 }
 local okPr, pr = pcall(MPANEL.prompt)
 if okPr then s.prompt = pr end
+local okA, acts = pcall(MPANEL.actions)
+if okA then s.actions = acts end
+s.statuses = {}
+for _, st2 in ipairs(STATUSES) do s.statuses[#s.statuses + 1] = { key = st2.key, short = st2.short, color = st2.color } end
 local keys, seen = {}, {}
 for _, order in ipairs({ CFG.statOrder, STAT.hoverOrder() }) do
 for _, key in ipairs(order) do
