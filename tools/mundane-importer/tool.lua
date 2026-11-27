@@ -15928,6 +15928,9 @@ end
 -- Without a host none of this runs and the card is exactly as before.
 -- A global table, not locals: this chunk is close to Lua's 200-local limit.
 MPANEL = { on = false, shown = false, queued = false, registered = false }
+-- A plain value the host can read with getVar before calling in: calling a
+-- function a card does not have raises an error in the game's chat.
+MUNDANE_PANEL_CARD = 1
 function MPANEL.host()
 local ok, v = pcall(function() return Global.getVar("MUNDANE_PANEL_API") end)
 return ok and v ~= nil
