@@ -14774,6 +14774,72 @@ function ACTIVATION.rolling(title, mod, modInk)
 MPANEL.baseRolling(title, mod, modInk)
 MPANEL.rolled(ACTIVATION.roll)
 end
+-- Prompts (S8-I3 item 3). The card's mid panel holds one question at a time:
+-- Out of Action (Revive), Recovery, a Nerve or group test, a fall height, or a
+-- yes/no question. It is exported with the buttons the card would show; each
+-- button names the card's own handler and the click it stands for, and an
+-- answer comes back through panelAction and that handler, guards included.
+MPANEL.PROMPT = {
+nerveGo = onNerveGo, nerveClose = onNerveClose, nerveOk = onNerveOk, nerveRoll = onNerveRoll,
+nerveValue = onNerveValue, nerveCover = onNerveCover, recoveryRoll = onRecoveryRoll,
+recoveryClose = onRecoveryClose, recoveryOut = onRecoveryOut, recoveryValue = onRecoveryValue,
+revive = onRevive,
+}
+function MPANEL.prompt()
+local function b(id, label, v) return { b = id, label = label, v = v or "-1" } end
+if fighter.outOfAction then
+return { kind = "out", title = ACTIVATION.outTitle(), ink = COL.diceOut, buttons = { b("revive", "Revive") } }
+end
+if ACTIVATION.isOpen() then
+local rec = fighter.recovery
+if ACTIVATION.doomed() then
+return { kind = "recovery", title = "Recovery", sub = 'Within 1" of ' .. tostring(rec.foes),
+buttons = { b("recoveryOut", "Out of Action"), b("recoveryOut", "Keep", "-2") } }
+end
+return { kind = "recovery", title = "Recovery", value = tostring(rec.dice) .. " dice",
+buttons = { b("recoveryValue", "-", "-2"), b("recoveryValue", "+"), b("recoveryRoll", "Roll"),
+b("recoveryClose", "X") } }
+end
+if not ACTIVATION.nerveOpen() then return nil end
+local head, stat = ACTIVATION.nerveTexts()
+local p = { kind = "nerve", title = head.text, ink = head.ink, sub = stat.text,
+value = ACTIVATION.nerveValue(), valueInk = ACTIVATION.nerveInk() }
+if ACTIVATION.questioning() then
+p.kind, p.value, p.valueInk = "question", nil, nil
+if ACTIVATION.asksPair() then
+p.value = ACTIVATION.coverText()
+p.buttons = { b("nerveCover", "-", "-2"), b("nerveCover", "+"), b("nerveGo", "Yes"), b("nerveClose", "X") }
+elseif ACTIVATION.asksYes() then
+p.buttons = { b("nerveGo", "Yes"), b("nerveClose", "X") }
+elseif ACTIVATION.asksSkip() then
+p.buttons = { b("nerveGo", CFG.disruptSkip or "Skip"), b("nerveClose", "X") }
+else
+p.buttons = { b("nerveGo", "Continue"), b("nerveClose", "X") }
+end
+elseif ACTIVATION.nerveAsks() then
+p.kind = "height"
+p.buttons = { b("nerveValue", "-", "-2"), b("nerveValue", "+"), b("nerveOk", "OK"), b("nerveClose", "X") }
+else
+p.buttons = { b("nerveValue", "-", "-2"), b("nerveValue", "+"), b("nerveRoll", "Roll"), b("nerveClose", "X") }
+end
+return p
+end
+-- The one way in from the host's view (S8-I3 item 1). One table, as obj.call
+-- passes it: { kind, player = colour, ... }. Each kind ends in a function the
+-- card's own UI already ends in.
+function panelAction(args)
+if type(args) ~= "table" then return false end
+local kind, color = tostring(args.kind or ""), tostring(args.player or "")
+local okP, player = pcall(function() return Player[color] end)
+if not (okP and player) then return false end
+if kind == "prompt" then
+local fn = MPANEL.PROMPT[tostring(args.b or "")]
+if not fn then return false end
+fn(player, tostring(args.v or "-1"), color .. "_" .. tostring(args.b))
+return true
+end
+return false
+end
 -- Everything the host's view shows, as the card itself would show it, encoded
 -- here: another script cannot encode a table this script owns.
 function getPanelState()
@@ -14788,6 +14854,8 @@ activation = f.activation, actionsLeft = f.actionsLeft, readyMarks = f.readyMark
 outOfAction = f.outOfAction == true, stats = {}, conditions = {}, weapons = {},
 skills = getSkills(), wargear = getWargear(), roll = MPANEL.roll,
 }
+local okPr, pr = pcall(MPANEL.prompt)
+if okPr then s.prompt = pr end
 local keys, seen = {}, {}
 for _, order in ipairs({ CFG.statOrder, STAT.hoverOrder() }) do
 for _, key in ipairs(order) do
