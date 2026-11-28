@@ -16128,11 +16128,12 @@ onTriggerClick(player, v, color .. "_btnStatus")
 return true
 end
 -- Who controls the fighter in the panels (decision 14): nil follows the gang's
--- place on the Controller, then side 1, side 2, neutral, and back. Only the
+-- place on the Controller, then side 1, side 2, neutral, ignored (left out of
+-- the panels' lists, as for the save's sample fighters), and back. Only the
 -- panels read it; the gang tag and Antares' gang logic are untouched.
 if kind == "control" then
 if ui.spectating(player, true) then return true end
-local nextOf = { [1] = 2, [2] = "neutral", neutral = nil }
+local nextOf = { [1] = 2, [2] = "neutral", neutral = "ignored", ignored = nil }
 if fighter.control == nil then fighter.control = 1 else fighter.control = nextOf[fighter.control] end
 MPANEL.touch()
 return true
