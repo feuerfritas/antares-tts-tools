@@ -15013,6 +15013,12 @@ out.ammoState = okA and st or nil
 local okR, rel = pcall(R.reliable, p)
 out.reliable = okR and rel or nil
 out.reliableUsed = p.reliableUsed == true or nil
+-- The profile's lower cell as the card shows it: a melee profile's attack
+-- count (A+1, x2, ...; pcnt steps it) or a ranged profile's ammo (AM, OUT, ...).
+local okV, pv = pcall(ui.profileView, i, pi, p)
+if okV and type(pv) == "table" and pv.second then
+out.second, out.melee = tostring(pv.second.text or ""), pv.melee == true or nil
+end
 end
 end
 local okH, hit = pcall(R.hit, w)
