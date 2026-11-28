@@ -16127,7 +16127,15 @@ if kind == "status" then
 onTriggerClick(player, v, color .. "_btnStatus")
 return true
 end
+-- Out of Action is one more status in the panel's menu: picking it puts the
+-- fighter out, and picking any other status from there revives into it.
 if kind == "setStatus" then
+if ui.spectating(player, true) then return true end
+if args.key == "out" then
+if not fighter.outOfAction then setOutOfAction(true) end
+return true
+end
+if fighter.outOfAction then setOutOfAction(false) end
 onPickStatus(player, "-1", color .. "_statusOpt_" .. tostring(args.key or ""))
 return true
 end
@@ -16236,6 +16244,7 @@ end)
 s.profileCols = okPC and cols or { "Hit", "SR", "LR", "S", "AP", "L", "D", "Am" }
 s.statuses = {}
 for _, st2 in ipairs(STATUSES) do s.statuses[#s.statuses + 1] = { key = st2.key, short = st2.short, color = st2.color } end
+s.statuses[#s.statuses + 1] = { key = "out", short = "OOA", color = "#FF4040" }
 local keys, seen = {}, {}
 for _, order in ipairs({ CFG.statOrder, STAT.hoverOrder() }) do
 for _, key in ipairs(order) do
