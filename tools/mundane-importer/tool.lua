@@ -16127,6 +16127,16 @@ if kind == "status" then
 onTriggerClick(player, v, color .. "_btnStatus")
 return true
 end
+-- Who controls the fighter in the panels (decision 14): nil follows the gang's
+-- place on the Controller, then side 1, side 2, neutral, and back. Only the
+-- panels read it; the gang tag and Antares' gang logic are untouched.
+if kind == "control" then
+if ui.spectating(player, true) then return true end
+local nextOf = { [1] = 2, [2] = "neutral", neutral = nil }
+if fighter.control == nil then fighter.control = 1 else fighter.control = nextOf[fighter.control] end
+MPANEL.touch()
+return true
+end
 -- Out of Action is one more status in the panel's menu: picking it puts the
 -- fighter out, and picking any other status from there revives into it.
 if kind == "setStatus" then
@@ -16245,6 +16255,7 @@ s.profileCols = okPC and cols or { "Hit", "SR", "LR", "S", "AP", "L", "D", "Am" 
 s.statuses = {}
 for _, st2 in ipairs(STATUSES) do s.statuses[#s.statuses + 1] = { key = st2.key, short = st2.short, color = st2.color } end
 s.statuses[#s.statuses + 1] = { key = "out", short = "OOA", color = "#FF4040" }
+s.control = fighter.control
 local keys, seen = {}, {}
 for _, order in ipairs({ CFG.statOrder, STAT.hoverOrder() }) do
 for _, key in ipairs(order) do
