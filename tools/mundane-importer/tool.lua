@@ -3079,7 +3079,7 @@ rawTexts = {},
 local function view(key)
 local v = ui.view[key]
 if not v then
-v = { hoverToken = 0, statsHover = false, yaw = CFG.yaw }
+v = { hoverToken = 0, statsHover = false, yaw = CFG.yaw, compact = MPANEL and MPANEL.on or nil }
 ui.view[key] = v
 end
 return v
@@ -7186,6 +7186,7 @@ local c = full .. "|" .. name
 if sent[c] == value then return end
 sent[c] = value
 if not seeding then self.UI.setAttribute(full, name, value) end
+if MPANEL then MPANEL.touch() end
 end
 local function setText(id, text, key)
 if not ui.built then return end
@@ -7200,6 +7201,7 @@ local c = full .. "|#text"
 if sent[c] == text then return end
 sent[c] = text
 if not seeding then self.UI.setValue(full, text) end
+if MPANEL then MPANEL.touch() end
 end
 local function setTextSize(id, size, w, h, key)
 local t = textSize(size, w, h)
@@ -7582,7 +7584,7 @@ end
 end
 function ui.drawArrows(key)
 for _, k in ipairs(key and { key } or ui.viewers) do
-setAttr("nameArrows", "active", view(k).nameHover == true, k)
+setAttr("nameArrows", "active", view(k).nameHover == true and not (MPANEL and MPANEL.on), k)
 end
 end
 function ACTIVATION.drawDice()
@@ -8526,6 +8528,7 @@ function onNameClick(player, value, id)
 if ui.spectating(player, true) then return end
 local key = viewerOf(id)
 if tostring(value) ~= "-2" then return end
+if MPANEL and MPANEL.on then return end
 ui.setCompact(key, not view(key).compact)
 end
 function onNameEnter(player, value, id)
@@ -15915,6 +15918,406 @@ end
 function checkLineOfSight(targetObject)
 return nil
 end
+-- Panel mode (S8, feature/card-panels). When the table's Global script offers
+-- the Mundane panel API (it sets MUNDANE_PANEL_API), the card registers with it.
+-- If the host turns panel mode on, the full card leaves the model, which keeps
+-- only its compact tag (name and wounds), and the host draws the fighter in its
+-- own screen panels from getPanelState(). In panel mode every redraw marks the
+-- card changed, at most once a frame, and the host pulls the state: its list
+-- shows every fighter's wounds, not only the ones a panel shows.
+-- Without a host none of this runs and the card is exactly as before.
+-- A global table, not locals: this chunk is close to Lua's 200-local limit.
+MPANEL = { on = false, shown = false, queued = false, registered = false }
+-- A plain value the host can read with getVar before calling in: calling a
+-- function a card does not have raises an error in the game's chat.
+MUNDANE_PANEL_CARD = 1
+function MPANEL.host()
+local ok, v = pcall(function() return Global.getVar("MUNDANE_PANEL_API") end)
+return ok and v ~= nil
+end
+function MPANEL.register()
+if not (type(fighter) == "table" and fighter.name) or not MPANEL.host() then return end
+local ok, on = pcall(function() return Global.call("mundaneRegister", { guid = self.getGUID() }) end)
+MPANEL.registered = ok == true
+if ok then setPanelMode({ on = on == true }) end
+end
+function MPANEL.deregister()
+if not MPANEL.registered then return end
+MPANEL.registered = false
+pcall(function() Global.call("mundaneDeregister", { guid = self.getGUID() }) end)
+end
+function MPANEL.touch()
+if not MPANEL.on or MPANEL.queued then return end
+MPANEL.queued = true
+Wait.frames(function()
+MPANEL.queued = false
+if MPANEL.on then
+pcall(function() Global.call("mundanePanelChanged", { guid = self.getGUID() }) end)
+end
+end, 1)
+end
+-- obj.call passes its table as the single argument, so every entry point here
+-- takes { on = ... } / { shown = ... } and also accepts a bare boolean.
+function MPANEL.flag(args, field)
+if type(args) == "table" then return args[field] == true or args[1] == true end
+return args == true
+end
+function setPanelMode(args)
+local on = MPANEL.flag(args, "on")
+if MPANEL.on == on then return on end
+MPANEL.on = on
+MPANEL.apply()
+MPANEL.touch()
+return on
+end
+-- A view made after this is compact from the start (view()), and a build bakes
+-- it in. A card already built is switched once its XML has loaded: setAttr on
+-- elements still loading reaches nothing, and its cache would then skip them.
+function MPANEL.apply()
+if not ui.built then return end
+local ok, loading = pcall(function() return self.UI.loading end)
+if ok and loading then Wait.frames(MPANEL.apply, 5) return end
+for _, k in ipairs(ui.viewers) do
+if (view(k).compact == true) ~= MPANEL.on then ui.setCompact(k, MPANEL.on) end
+end
+ui.drawArrows()
+end
+function isPanelMode() return MPANEL.on end
+-- The host calls this after its own load, so cards that loaded before it are
+-- registered all the same.
+function panelRegister() MPANEL.register() return MPANEL.registered end
+function panelShown(args)
+MPANEL.shown = MPANEL.flag(args, "shown")
+if MPANEL.shown then
+pcall(function() Global.call("mundanePanelChanged", { guid = self.getGUID() }) end)
+end
+return MPANEL.shown
+end
+-- Dice (S8-I3 item 4). The card shows a roll for CFG.diceShow seconds and clears
+-- it, so the host keeps its own copy: every roll the card shows is turned into
+-- display-ready data here (labels and inks as the card's own dice draw them)
+-- and numbered, and the host shows it until this fighter's next roll.
+MPANEL.rollSeq = 0
+function MPANEL.dieOf(kind, v, hl, spared)
+local f = ACTIVATION.face(kind, v, 10, hl, spared)
+local label = f.num
+if kind == "injury" then
+label = ACTIVATION.STAND_IN[ACTIVATION.INJURY_DICE[clamp(math.floor(tonumber(v) or 1), 1, 6)] or "serious"]
+or tostring(v)
+end
+if f.icon == "dice_ammo" or f.mark then label = (label or tostring(v)) .. "!" end
+return { label = label or tostring(v), kind = kind, ink = f.numInk or f.iconInk or f.ink, fill = f.fill }
+end
+function MPANEL.rolled(r)
+if not MPANEL.on or type(r) ~= "table" then return end
+local ok, snap = pcall(function()
+local s = { title = r.title and tostring(r.title) or nil, rolling = r.rolling == true or nil }
+if not r.rolling then
+s.dice = {}
+for i, v in ipairs(r.faces or {}) do
+if i > ACTIVATION.MAX_SHOWN then break end
+local kind = (r.kinds and r.kinds[i]) or r.kind or "d6"
+local d = MPANEL.dieOf(kind, v, r.hls and r.hls[i] or r.hl, r.spare)
+local tags = {}
+for _, k in ipairs(type(r.tags) == "table" and type(r.tags[i]) == "table" and r.tags[i] or {}) do
+local e = ACTIVATION.effect(k)
+tags[#tags + 1] = e and e.short or tostring(k)
+end
+if #tags > 0 then d.tags = table.concat(tags, " ") end
+if type(r.half) == "table" and r.half[i] then d.half = true end
+s.dice[#s.dice + 1] = d
+end
+if r.result then
+s.sum, s.sumInk = ACTIVATION.STAND_IN[r.result] or tostring(r.result), ACTIVATION.injuryInk(r.result)
+elseif r.sum then
+s.sum, s.sumInk = tostring(r.sum), r.sumInk
+end
+if r.ammoState then s.ammo = tostring(r.ammoState):upper() end
+if r.lead then s.lead, s.leadInk = tostring(r.lead), r.leadInk end
+if type(r.lines) == "table" then
+s.lines = {}
+for k, l in ipairs(r.lines) do if k <= 2 then s.lines[k] = tostring(l) end end
+end
+end
+return s
+end)
+if not ok then return end
+MPANEL.rollSeq = MPANEL.rollSeq + 1
+snap.seq = MPANEL.rollSeq
+MPANEL.roll = snap
+MPANEL.touch()
+end
+MPANEL.baseShowDice, MPANEL.baseRolling = ACTIVATION.showDice, ACTIVATION.rolling
+function ACTIVATION.showDice(roll)
+MPANEL.baseShowDice(roll)
+MPANEL.rolled(roll)
+end
+function ACTIVATION.rolling(title, mod, modInk)
+MPANEL.baseRolling(title, mod, modInk)
+MPANEL.rolled(ACTIVATION.roll)
+end
+-- Prompts (S8-I3 item 3). The card's mid panel holds one question at a time:
+-- Out of Action (Revive), Recovery, a Nerve or group test, a fall height, or a
+-- yes/no question. It is exported with the buttons the card would show; each
+-- button names the card's own handler and the click it stands for, and an
+-- answer comes back through panelAction and that handler, guards included.
+MPANEL.PROMPT = {
+nerveGo = onNerveGo, nerveClose = onNerveClose, nerveOk = onNerveOk, nerveRoll = onNerveRoll,
+nerveValue = onNerveValue, nerveCover = onNerveCover, recoveryRoll = onRecoveryRoll,
+recoveryClose = onRecoveryClose, recoveryOut = onRecoveryOut, recoveryValue = onRecoveryValue,
+revive = onRevive,
+}
+function MPANEL.prompt()
+local function b(id, label, v) return { b = id, label = label, v = v or "-1" } end
+if fighter.outOfAction then
+return { kind = "out", title = ACTIVATION.outTitle(), ink = COL.diceOut, buttons = { b("revive", "Revive") } }
+end
+if ACTIVATION.isOpen() then
+local rec = fighter.recovery
+if ACTIVATION.doomed() then
+return { kind = "recovery", title = "Recovery", sub = 'Within 1" of ' .. tostring(rec.foes),
+buttons = { b("recoveryOut", "Out of Action"), b("recoveryOut", "Keep", "-2") } }
+end
+return { kind = "recovery", title = "Recovery", value = tostring(rec.dice) .. " dice",
+buttons = { b("recoveryValue", "-", "-2"), b("recoveryValue", "+"), b("recoveryRoll", "Roll"),
+b("recoveryClose", "X") } }
+end
+if not ACTIVATION.nerveOpen() then return nil end
+local head, stat = ACTIVATION.nerveTexts()
+local p = { kind = "nerve", title = head.text, ink = head.ink, sub = stat.text,
+value = ACTIVATION.nerveValue(), valueInk = ACTIVATION.nerveInk() }
+if ACTIVATION.questioning() then
+p.kind, p.value, p.valueInk = "question", nil, nil
+if ACTIVATION.asksPair() then
+p.value = ACTIVATION.coverText()
+p.buttons = { b("nerveCover", "-", "-2"), b("nerveCover", "+"), b("nerveGo", "Yes"), b("nerveClose", "X") }
+elseif ACTIVATION.asksYes() then
+p.buttons = { b("nerveGo", "Yes"), b("nerveClose", "X") }
+elseif ACTIVATION.asksSkip() then
+p.buttons = { b("nerveGo", CFG.disruptSkip or "Skip"), b("nerveClose", "X") }
+else
+p.buttons = { b("nerveGo", "Continue"), b("nerveClose", "X") }
+end
+elseif ACTIVATION.nerveAsks() then
+p.kind = "height"
+p.buttons = { b("nerveValue", "-", "-2"), b("nerveValue", "+"), b("nerveOk", "OK"), b("nerveClose", "X") }
+else
+p.buttons = { b("nerveValue", "-", "-2"), b("nerveValue", "+"), b("nerveRoll", "Roll"), b("nerveClose", "X") }
+end
+return p
+end
+-- The one way in from the host's view (S8-I3 item 1). One table, as obj.call
+-- passes it: { kind, player = colour, ... }. Each kind ends in a function the
+-- card's own UI already ends in.
+function panelAction(args)
+if type(args) ~= "table" then return false end
+local kind, color = tostring(args.kind or ""), tostring(args.player or "")
+local okP, player = pcall(function() return Player[color] end)
+if not (okP and player) then return false end
+local v = tostring(args.v or "-1")
+if kind == "prompt" then
+local fn = MPANEL.PROMPT[tostring(args.b or "")]
+if not fn then return false end
+fn(player, v, color .. "_" .. tostring(args.b))
+return true
+end
+-- The status button: left activates a ready fighter or finishes an active one,
+-- right toggles ready -- onTriggerClick on btnStatus, as the card's own button.
+if kind == "status" then
+onTriggerClick(player, v, color .. "_btnStatus")
+return true
+end
+-- Who controls the fighter in the panels (decision 14): nil follows the gang's
+-- place on the Controller, then side 1, side 2, neutral, ignored (left out of
+-- the panels' lists, as for the save's sample fighters), and back. Only the
+-- panels read it; the gang tag and Antares' gang logic are untouched.
+if kind == "control" then
+if ui.spectating(player, true) then return true end
+local nextOf = { [1] = 2, [2] = "neutral", neutral = "ignored", ignored = nil }
+if fighter.control == nil then fighter.control = 1 else fighter.control = nextOf[fighter.control] end
+MPANEL.touch()
+return true
+end
+-- Out of Action is one more status in the panel's menu: picking it puts the
+-- fighter out, and picking any other status from there revives into it.
+if kind == "setStatus" then
+if ui.spectating(player, true) then return true end
+if args.key == "out" then
+if not fighter.outOfAction then setOutOfAction(true) end
+return true
+end
+if fighter.outOfAction then setOutOfAction(false) end
+onPickStatus(player, "-1", color .. "_statusOpt_" .. tostring(args.key or ""))
+return true
+end
+-- A weapon's diamond: switch its role, or use a flamer's template.
+if kind == "weapon" then
+onTriggerClick(player, v, color .. "_btnWeapon_" .. tostring(tonumber(args.weapon) or 0))
+return true
+end
+-- A weapon profile's controls (S8-I3 step 4). The card's popup does a set-up
+-- when it opens (openedFlyout: attack count, Rapid Fire or ATK, combi or extra
+-- ammo, aim, support) and resets aim, reroll and the measure when it closes.
+-- The panel has no popup, so the card opens the weapon for this player before
+-- the first control on it, and closes it again shortly after an attack -- what
+-- a player does on the card: open, set up, ATK, leave. Without the open, an
+-- attack fires with whatever count it had last (INT-1 run 4).
+-- tag: patk (left attack, right Rapid Fire, middle aim), pammo (left/right
+-- ammo state, middle reload), pcnt (attack count), phit (Hit +/-, middle
+-- reroll), padj (a profile column +/-, col = its index), prelBtn (Reliable).
+if kind == "profile" then
+local tag, i, pi = tostring(args.tag or ""), tonumber(args.weapon), tonumber(args.profile)
+local handler = ({ patk = onProfileButton, pammo = onProfileButton, pcnt = onProfileButton,
+phit = onHitClick, padj = onProfileStatClick, prelBtn = onReliableClick })[tag]
+if not (handler and i and pi and weaponAt(i)) then return false end
+MPANEL.open = MPANEL.open or {}
+if MPANEL.open[color] ~= i then
+ui.showFlyout("pop_" .. i, color)
+MPANEL.open[color] = i
+end
+local id = tag == "phit" and ("phit_" .. i .. "_" .. pi)
+or tag == "padj" and ("padj_" .. i .. "_" .. pi .. "_" .. tostring(tonumber(args.col) or 0))
+or tag == "prelBtn" and ("prelBtn_" .. i .. "_" .. pi)
+or (tag .. "_" .. i .. "_" .. pi)
+handler(player, v, color .. "_" .. id)
+if tag == "patk" and v == "-1" then
+Wait.time(function()
+if MPANEL.open[color] == i then
+MPANEL.open[color] = nil
+ui.showFlyout(nil, color)
+end
+end, tonumber(CFG.panelAttackLinger) or 1.5)
+end
+return true
+end
+-- An action, by its panel and key. The index the card's own ids use is found
+-- now, so a list that changed since the host drew it cannot misfire.
+if kind == "action" then
+local prefix, key = tostring(args.prefix or ""), tostring(args.key or "")
+if prefix ~= ui.actionPanelOf(fighter.status) and prefix ~= SKILL.special() then return false end
+local P = PANELS[prefix]
+for k, a in ipairs(P and P.list or {}) do
+if MPANEL.actionKey(a) == key then
+onChooseAction(player, "-1", color .. "_" .. prefix .. "_" .. k)
+return true
+end
+end
+return false
+end
+return false
+end
+function MPANEL.actionKey(a) return a.key or ("roll:" .. tostring(a.roll)) end
+-- The action lists the card would show: the current status's, and the Special
+-- tab's (skills, wargear, Wyrd powers and the rolls), each entry with its label,
+-- cost and dimming as the card draws them.
+function MPANEL.actions()
+local function list(prefix)
+local P = prefix and PANELS[prefix]
+if not P then return nil end
+local out = {}
+for _, a in ipairs(P.list or {}) do
+-- The panel's own state function (actionState, which is local to an
+-- earlier block and not visible here): on, label, type ink, dimmed.
+local ok, _, label, ink, dim = pcall(P.state, a)
+local okC, cost = pcall(SKILL.costOf, a)
+out[#out + 1] = { key = MPANEL.actionKey(a), label = ok and tostring(label or a.label or a.key) or tostring(a.key),
+dim = ok and dim == true or nil, ink = ok and type(ink) == "string" and ink or nil,
+cost = okC and cost and tostring(cost) or nil }
+end
+return { prefix = prefix, list = out }
+end
+local okS, sp = pcall(SKILL.special)
+return { status = list(ui.actionPanelOf(fighter.status)), special = okS and list(sp) or nil }
+end
+-- Everything the host's view shows, as the card itself would show it, encoded
+-- here: another script cannot encode a table this script owns.
+function getPanelState()
+local f = type(fighter) == "table" and fighter or {}
+local st = statusDef(f.status)
+local s = {
+v = 1, guid = self.getGUID(), name = f.name or "", rank = f.rank or "", type = f.ftype or "",
+gang = f.gang or "", gangType = f.gangType or "", category = f.category or "",
+wounds = { current = tonumber((f.wounds or {}).current) or 0, max = ui.hpMax() },
+status = { key = st.key, label = st.label, short = st.short, color = st.color },
+activation = f.activation, actionsLeft = f.actionsLeft, readyMarks = f.readyMarks,
+outOfAction = f.outOfAction == true, stats = {}, conditions = {}, weapons = {},
+skills = getSkills(), wargear = getWargear(), roll = MPANEL.roll,
+}
+local okPr, pr = pcall(MPANEL.prompt)
+if okPr then s.prompt = pr end
+local okA, acts = pcall(MPANEL.actions)
+if okA then s.actions = acts end
+local okPC, cols = pcall(function()
+local out = {}
+for ci, c in ipairs(PROFILE_COLS) do out[ci] = c.key end
+return out
+end)
+s.profileCols = okPC and cols or { "Hit", "SR", "LR", "S", "AP", "L", "D", "Am" }
+s.statuses = {}
+for _, st2 in ipairs(STATUSES) do s.statuses[#s.statuses + 1] = { key = st2.key, short = st2.short, color = st2.color } end
+s.statuses[#s.statuses + 1] = { key = "out", short = "OOA", color = "#FF4040" }
+s.control = fighter.control
+local keys, seen = {}, {}
+for _, order in ipairs({ CFG.statOrder, STAT.hoverOrder() }) do
+for _, key in ipairs(order) do
+if not seen[key] then seen[key], keys[#keys + 1] = true, key end
+end
+end
+for _, key in ipairs(keys) do
+local ok, text, color = pcall(function()
+if key == "Inv" then return STAT.inv() .. "+", COL.value end
+return statText(key, nil), statColor(key, nil)
+end)
+s.stats[#s.stats + 1] = { key = key, text = ok and tostring(text) or "-", color = ok and color or nil }
+end
+for _, c in ipairs(CONDITIONS) do
+local ok, n = pcall(conditionCount, c.key)
+if ok and (tonumber(n) or 0) > 0 then
+s.conditions[#s.conditions + 1] = { key = c.key, label = c.label or c.key, n = tonumber(n) }
+end
+end
+for i = 1, weaponCount() do
+local w = weaponAt(i)
+if w then
+local profiles = {}
+for _, p in ipairs(w.profiles or {}) do
+local out = {}
+for k, v in pairs(p) do
+if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then out[k] = v end
+end
+profiles[#profiles + 1] = out
+end
+local R = TRAIT_RULES
+for pi, p in ipairs(w.profiles or {}) do
+local out = profiles[pi]
+if out then
+local okA, st = pcall(R.ammoState, w, p)
+out.ammoState = okA and st or nil
+local okR, rel = pcall(R.reliable, p)
+out.reliable = okR and rel or nil
+out.reliableUsed = p.reliableUsed == true or nil
+-- The profile's lower cell as the card shows it: a melee profile's attack
+-- count (A+1, x2, ...; pcnt steps it) or a ranged profile's ammo (AM, OUT, ...).
+local okV, pv = pcall(ui.profileView, i, pi, p)
+if okV and type(pv) == "table" and pv.second then
+out.second, out.melee = tostring(pv.second.text or ""), pv.melee == true or nil
+end
+end
+end
+local okH, hit = pcall(R.hit, w)
+local okL, role = pcall(R.roleLabel, w)
+local okG, glow = pcall(R.glow, w)
+s.weapons[#s.weapons + 1] = { index = i, name = w.name or "", profiles = profiles,
+hit = okH and hit or nil, role = okL and role or nil, glow = okG and glow or nil,
+aiming = R.aiming and R.aiming[w] == true or nil, reroll = R.reroll and R.reroll[w] or nil }
+end
+end
+return JSON.encode(s)
+end
+-- No onDestroy deregister: a Global.call made while the table is being torn
+-- down (loading another save) raises an error in chat that pcall cannot catch.
+-- The host notices a card that has gone. mundaneDeregister stays for a card
+-- that leaves panel mode on purpose.
 function onSave()
 return JSON.encode({
 fighter = fighter,
@@ -15948,6 +16351,7 @@ setFighter(data)
 currentBase()
 engage.spot = positionOf(self)
 ACTIVATION.powerMark()
+MPANEL.register()
 end, 1)
 if wait > 0 then
 Wait.time(function()
